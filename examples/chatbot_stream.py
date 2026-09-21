@@ -1,16 +1,16 @@
 """Chatbot streaming demo: LLM tokens -> engine stream -> audio.
 
-Run against a real OpenAI key (loaded from .env):
+Run against a real provider key (GEMINI_API_KEY or OPENAI_API_KEY, from .env):
 
-    uv run python examples/chatbot_stream.py
+    python examples/chatbot_stream.py
 
 It simulates an LLM emitting tokens one at a time with a small delay, feeds
 them through ``SentenceChunker``, and streams each completed sentence through
-the engine. Audio bytes are written to ``output/chatbot_stream.mp3`` as they
+the engine. Audio bytes are written to ``output/chatbot_stream.wav`` as they
 arrive so you can hear the first sentence before the LLM has finished talking.
 
 No extra playback dependency: we just save the file and print timing. Open
-``output/chatbot_stream.mp3`` in any player to hear the result.
+``output/chatbot_stream.wav`` in any player to hear the result.
 """
 
 from __future__ import annotations
@@ -52,7 +52,8 @@ async def main() -> None:
     providers = build_registry(settings)
     if not providers:
         raise SystemExit(
-            "No providers configured. Set OPENAI_API_KEY in your .env first."
+            "No providers configured. Set GEMINI_API_KEY (or OPENAI_API_KEY) "
+            "in your .env first."
         )
     engine = TTSEngine(
         providers=providers,
@@ -62,9 +63,9 @@ async def main() -> None:
 
     out_dir = Path(settings.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = out_dir / "chatbot_stream.mp3"
+    out_path = out_dir / "chatbot_stream.wav"
 
-    opts = SynthOpts(format="mp3")
+    opts = SynthOpts(format="wav")
     chunker = SentenceChunker(max_length=200)
 
     started = time.perf_counter()

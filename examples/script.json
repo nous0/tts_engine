@@ -1,0 +1,26 @@
+[
+  {
+    "speaker": "Alice",
+    "text": "Welcome back to Sound Bytes, the show about the machinery behind modern audio. I'm Alice."
+  },
+  {
+    "speaker": "Bob",
+    "text": "And I'm Bob. Today we're talking about text to speech, and why it suddenly sounds so good."
+  },
+  {
+    "speaker": "Alice",
+    "text": "The short answer is that the models stopped stitching recorded fragments together and started generating waveforms directly."
+  },
+  {
+    "speaker": "Bob",
+    "text": "Which is also why latency became interesting. If you generate audio sentence by sentence, a chatbot can start speaking before it has finished thinking."
+  },
+  {
+    "speaker": "Alice",
+    "text": "Exactly. And for a podcast like this one, you flip the priority. Nobody is waiting, so you spend the time on quality instead."
+  },
+  {
+    "speaker": "Bob",
+    "text": "Same engine, different trade-off. That's a good place to end. Thanks for listening!"
+  }
+]

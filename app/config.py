@@ -13,15 +13,22 @@ class Settings(BaseSettings):
     )
 
     # Providers
+    # Kokoro: local, CPU-only, no API key. Registered when installed + enabled.
+    kokoro_enabled: bool = True
+    kokoro_voice: str = "af_heart"
+    gemini_api_key: str | None = None
+    gemini_tts_model: str = "gemini-2.5-flash-preview-tts"
     openai_api_key: str | None = None
     openai_tts_model: str = "gpt-4o-mini-tts"
 
-    # Engine defaults
-    default_provider: str = "openai"
-    default_voice: str = "alloy"
+    # Engine defaults (local Kokoro needs no key)
+    default_provider: str = "kokoro"
+    default_voice: str = "af_heart"
 
-    # Output (used by later phases)
+    # Podcast output + job store
     output_dir: str = "./output"
+    jobs_db: str = "./output/jobs.db"
+    podcast_pause_ms: int = 600
 
 
 @lru_cache

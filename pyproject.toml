@@ -3,7 +3,7 @@ name = "tts-engine"
 version = "0.1.0"
 description = "A TTS engine backend that wraps cloud TTS providers for chatbot streaming and podcast generation."
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.12,<3.13"
 dependencies = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.30",
@@ -11,6 +11,7 @@ dependencies = [
     "pydantic-settings>=2.3",
     "httpx>=0.27",
     "openai>=1.40",
+    "google-genai>=1.0",
 ]
 
 [project.optional-dependencies]
@@ -18,6 +19,14 @@ dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
     "ruff>=0.5",
+]
+ui = [
+    "streamlit>=1.36",
+]
+local = [
+    # Kokoro-82M local TTS (CPU). Pulls torch (CPU), numpy, misaki, huggingface_hub.
+    "kokoro>=0.9",
+    "soundfile>=0.12",
 ]
 
 [tool.setuptools.packages.find]
@@ -30,6 +39,8 @@ testpaths = ["tests"]
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+# Vendored third-party checkout, not part of this project's sources.
+extend-exclude = ["kokoro-tts"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]

@@ -12,7 +12,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import Response, StreamingResponse
 
 from app.core.engine import ProviderNotConfigured, TTSEngine
-from app.core.providers.base import SynthOpts
+from app.core.providers.base import SynthOpts, UnsupportedFormat
 from app.models.schemas import SpeechRequest, SpeechStreamRequest
 
 router = APIRouter(prefix="/v1", tags=["speech"])
@@ -41,7 +41,7 @@ async def create_speech(req: SpeechRequest, request: Request) -> Response:
         audio = await _engine(request).synthesize(
             req.text, voice=req.voice, provider=req.provider, opts=opts
         )
-    except ProviderNotConfigured as exc:
+    except (ProviderNotConfigured, UnsupportedFormat) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     media_type = _MEDIA_TYPES.get(req.format, "application/octet-stream")
@@ -86,12 +86,18 @@ async def _stream_audio(
 async def create_speech_stream(
     req: SpeechStreamRequest, request: Request
 ) -> StreamingResponse:
-    # Validate the provider up-front so an unconfigured provider returns a
-    # clean 400 before we commit to a chunked 200 response.
+    # Validate up-front so an unconfigured provider or unsupported format
+    # returns a clean 400 before we commit to a chunked 200 response.
     try:
-        _engine(request).get_provider(req.provider)
+        provider = _engine(request).get_provider(req.provider)
     except ProviderNotConfigured as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    can_produce = getattr(provider, "can_produce", None)
+    if can_produce is not None and not can_produce(req.format):
+        raise HTTPException(
+            status_code=400, detail=str(UnsupportedFormat(req.format, provider.name))
+        )
 
     media_type = _MEDIA_TYPES.get(req.format, "application/octet-stream")
     return StreamingResponse(
