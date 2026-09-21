@@ -17,3 +17,5 @@ output/
 *.opus
 
 run.txt
+# Vendored upstream Kokoro checkout (its own git repo; app uses the kokoro PyPI package)
+kokoro-tts/

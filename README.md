@@ -1,71 +1,106 @@
 # TTS Engine
 
-A Python/FastAPI backend that wraps cloud TTS providers behind one API. It targets
-two consumers: **chatbot** (low-latency streaming speech) and **podcast** (long-form,
-multi-speaker audio files). See `CLAUDE.md` for the full design and roadmap.
+A Python/FastAPI backend that wraps TTS providers behind one API. It targets two
+consumers: **chatbot** (low-latency streaming speech) and **podcast** (long-form,
+multi-speaker audio files rendered as background jobs).
 
-**Status:** Phase 2 — scaffold + OpenAI provider + one-shot `POST /v1/speech` and
-chunked streaming `POST /v1/speech/stream` (sentence-by-sentence).
+**Status:** Phases 1–3 done, Phase 4 partial (Kokoro + Gemini + OpenAI providers;
+`GET /v1/voices` not built yet), Phase 5 polish not started. See `CONTEXT.md` for the
+current to-do list.
+
+## Providers
+
+| Provider | Kind | Enabled when |
+|---|---|---|
+| `kokoro` (code default) | Local Kokoro-82M on CPU, no key | `local` extra installed and `KOKORO_ENABLED=true` |
+| `gemini` | Google cloud | `GEMINI_API_KEY` set |
+| `openai` | OpenAI cloud | `OPENAI_API_KEY` set |
+
+Only usable providers are registered. Requesting any other returns an error listing the
+available ones. `DEFAULT_PROVIDER` / `DEFAULT_VOICE` in `.env` override the code default.
 
 ## Setup
 
 ```bash
-python -m venv .venv
-.venv\Scripts\activate            # Windows PowerShell:  .venv\Scripts\Activate.ps1
-pip install -e ".[dev]"
-
-copy .env.example .env             # then edit .env and add OPENAI_API_KEY
+uv sync --extra dev --extra local --extra ui   # drop "local" to skip Kokoro (pulls CPU torch)
+copy .env.example .env                          # then add any API keys you want
 ```
+
+The first Kokoro call downloads the model from Hugging Face, which takes a few minutes once.
+Compressed output formats (mp3/opus/aac/flac) need **ffmpeg** on PATH. `wav` and `pcm`
+always work.
 
 ## Run
 
 ```bash
-uvicorn app.main:app --reload
+uv run uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+uv run streamlit run streamlit_app.py      # optional browser test UI
 ```
 
 - Swagger UI: http://127.0.0.1:8000/docs
 - Health: http://127.0.0.1:8000/health
 
-## Synthesize speech
+## API
+
+| Method | Path | Purpose |
+|---|---|---|
+| POST | `/v1/speech` | One-shot synthesis, returns an audio file |
+| POST | `/v1/speech/stream` | Chunked streaming, sentence-by-sentence |
+| POST | `/v1/podcast` | Submit a multi-speaker script, returns `job_id` |
+| GET | `/v1/jobs` | List recent jobs |
+| GET | `/v1/jobs/{id}` | Job status and progress (`audio_url` when done) |
+| GET | `/v1/jobs/{id}/audio` | Download the finished podcast |
+| GET | `/health` | Liveness |
+
+### Speech
 
 ```bash
 curl -X POST http://127.0.0.1:8000/v1/speech \
   -H "Content-Type: application/json" \
-  -d "{\"text\":\"Hello world\",\"voice\":\"alloy\"}" \
-  --output hello.mp3
+  -d "{\"text\":\"Hello world\",\"provider\":\"kokoro\",\"voice\":\"af_heart\"}" \
+  --output hello.wav
 ```
 
-Request fields: `text` (required), `voice`, `provider`, `format` (mp3/wav/opus/aac/flac/pcm),
-`speed` (0.25–4.0, tts-1 models only), `instructions` (style hint).
+Fields: `text` (required), `voice`, `provider`, `format` (default `wav`), `speed`,
+`instructions` (style hint, where the provider supports it).
 
-## Stream speech (chatbot)
+### Streaming (chatbot)
 
-`POST /v1/speech/stream` splits the text into sentences and streams audio chunks
-back so the client can start playing before the whole clip is synthesized.
+Same body as `/v1/speech`, plus `max_sentence_length` (default 200). The text is split
+into sentences and each one is streamed as soon as it's synthesized, so playback can start
+early.
 
 ```bash
 curl -X POST http://127.0.0.1:8000/v1/speech/stream \
   -H "Content-Type: application/json" \
-  -d "{\"text\":\"Hello world. How are you?\",\"voice\":\"alloy\"}" \
-  --output stream.mp3
+  -d "{\"text\":\"Hello world. How are you?\"}" --output stream.wav
 ```
 
-Same fields as `/v1/speech`, plus `max_sentence_length` (default 200, 20–2000).
-The response is a chunked HTTP stream of raw audio bytes in the requested format.
+### Podcast
 
-For an end-to-end demo (simulated LLM tokens -> chunker -> engine -> mp3), run:
+Send either `turns` (`[{"speaker": "Alice", "text": "..."}]`) or a plain-text `script`
+(`Alice: ...` lines). `voices` (a speaker → voice map) is optional. Speakers you don't map
+get voices from the provider's catalog automatically.
 
 ```bash
-uv run python examples/chatbot_stream.py
+curl -X POST http://127.0.0.1:8000/v1/podcast \
+  -H "Content-Type: application/json" \
+  -d "{\"script\":\"Alice: Hi Bob.\nBob: Hi Alice!\",\"provider\":\"kokoro\"}"
+# -> {"job_id": "...", "status": "queued", ...}
+curl http://127.0.0.1:8000/v1/jobs/<job_id>
+curl http://127.0.0.1:8000/v1/jobs/<job_id>/audio --output podcast.wav
+```
+
+## Examples
+
+```bash
+uv run python examples/chatbot_stream.py                                   # simulated LLM tokens -> streaming audio
+uv run python examples/generate_podcast.py examples/script.json --provider kokoro   # -> output/script.wav
 ```
 
 ## Test
 
 ```bash
-pytest        # hermetic; uses a fake provider, no API key needed
-ruff check .
+uv run pytest        # hermetic: providers are mocked, no API keys needed
+uv run ruff check .
 ```
-
-## Roadmap
-
-Phase 3 podcast pipeline · Phase 4 ElevenLabs + voices · Phase 5 polish.

@@ -1,107 +1,106 @@
-# CLAUDE.md — TTS Engine
+# CLAUDE.md
 
-Guidance for Claude Code (and contributors) working in this repo.
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## Project
+**Read `CONTEXT.md` first.** It holds the current working state, what's done, and the
+prioritized to-do list. This file covers how the code works; roadmap and status belong in
+CONTEXT.md.
 
-A **TTS engine as a Python/FastAPI backend service** that wraps **cloud TTS providers** (OpenAI, ElevenLabs, later Azure/Google) behind one API. It serves two consumers:
+## What this is
 
-1. **Chatbot integration** — real-time, **low-latency streaming** speech. Text may arrive incrementally (LLM tokens); synthesize sentence-by-sentence and stream audio chunks back so the bot can start speaking before the full reply is ready. Typically a single voice.
-2. **Podcast generation** — **long-form, multi-speaker** dialogue. Takes a script (or a topic), assigns a voice per speaker, synthesizes each turn, stitches segments with pauses/normalization, and returns a downloadable audio file. Quality over speed; runs as a background job.
+A Python 3.12 FastAPI service that puts several TTS providers behind one API, for two
+consumers:
+- **Chatbot streaming**: low-latency, sentence-by-sentence audio over chunked HTTP (`POST /v1/speech/stream`).
+- **Podcast generation**: multi-speaker scripts rendered as a background job and stitched into one file (`POST /v1/podcast` → `GET /v1/jobs/{id}` → `GET /v1/jobs/{id}/audio`).
 
-Both modes share one **provider abstraction** and one **audio pipeline** — a single pluggable engine, not two scripts. Cloud APIs chosen for quality, built-in streaming, and fast time-to-ship; the abstraction keeps a local backend (Piper/XTTS) as a future drop-in.
+Providers: **Kokoro** (local, CPU, no key, the configured default), **Gemini**, **OpenAI**.
+`GET /v1/voices` is not built yet; `TTSEngine.list_voices()` already exists for it.
+
+## Commands
+
+Uses `uv` (there's a `uv.lock`). Extras: `dev` (pytest, ruff), `ui` (streamlit), `local` (kokoro + soundfile, which pulls in CPU torch).
+
+```bash
+uv sync --extra dev --extra local --extra ui     # install
+uv run uvicorn app.main:app --reload --host 0.0.0.0 --port 8000   # API; Swagger at /docs
+uv run streamlit run streamlit_app.py            # visual tester for /v1/speech + /stream
+
+uv run pytest                                    # all tests
+uv run pytest tests/test_podcast.py              # one file
+uv run pytest tests/test_chunker.py::test_name   # one test
+uv run pytest -k kokoro                          # by keyword
+
+uv run ruff check .                              # lint (E,F,I,UP,B; line length 100)
+uv run ruff format .
+
+uv run python examples/chatbot_stream.py                      # streaming demo
+uv run python examples/generate_podcast.py examples/script.json  # end-to-end podcast
+```
+
+Config comes from `.env` through pydantic-settings (`app/config.py`; see `.env.example`).
+Compressed formats (mp3/opus/aac/flac) need `ffmpeg` on PATH. Without it, those formats
+return 400. `wav` and `pcm` are always available.
 
 ## Architecture
 
-**Layers:**
-- **API (FastAPI)** — HTTP endpoints + streaming (SSE/WebSocket) + OpenAPI docs.
-- **Engine (orchestrator)** — routes requests to a provider, applies chunking, drives audio assembly and jobs.
-- **Providers** — one class per cloud service behind a common `TTSProvider` interface; selected via config/registry.
-- **Audio pipeline** — concatenation, silence padding, loudness normalization, format encoding (mp3/wav/opus) via `pydub` + `ffmpeg`.
-- **Jobs** — async store for long-running podcast renders (SQLite-backed, in-proc worker for MVP).
+Request flow: **route → `TTSEngine` → provider → (podcast only) audio pipeline → job store.**
 
-**Provider interface** (`app/core/providers/base.py`):
-```python
-class TTSProvider(Protocol):
-    async def synthesize(self, text: str, voice: str, opts: SynthOpts) -> bytes: ...
-    async def synthesize_stream(self, text: str, voice: str, opts: SynthOpts) -> AsyncIterator[bytes]: ...
-    async def list_voices(self) -> list[Voice]: ...
-```
-A `registry.py` maps provider name → instance, configured from env. Start with **OpenAI** (simplest streaming) and **ElevenLabs** (best quality + voice variety + native dialogue). Azure/Google are later additions requiring no interface change.
+- **`app/main.py` lifespan** builds everything once and stores it on `app.state`: `engine`
+  (from `build_registry(settings)`), `output_dir`, and `jobs` (the `JobStore`). Routes get
+  these from `request.app.state` through small helpers (`_engine(request)`, and so on), not
+  FastAPI `Depends`.
+- **Provider registry** (`app/core/providers/registry.py`): a provider is registered only
+  if it can actually run. Gemini and OpenAI need an API key. Kokoro needs `kokoro_enabled`
+  and the `kokoro` package importable (`kokoro.is_installed()`). If you request an
+  unregistered provider, you get `ProviderNotConfigured`, which lists the available ones.
+  Adding a provider means implementing the `TTSProvider` protocol in `providers/base.py`
+  (`synthesize`, `synthesize_stream`, `list_voices`) and adding a gated entry in
+  `build_registry`.
+- **Canonical audio format: 24 kHz, 16-bit, mono PCM** (constants in
+  `providers/_audio.py`). Kokoro and Gemini produce it natively; OpenAI is asked for
+  `response_format="pcm"`. `app/core/audio.py` (concat, silence, normalize, encode) builds
+  on the same primitives, so provider output and stitched output always match. Any new
+  provider must produce this format when `opts.format == "pcm"`.
+- **Streaming**: `TTSEngine.synthesize_stream` splits the full request text with
+  `split_sentences` and streams each sentence through the provider's `synthesize_stream`.
+  For WAV, providers yield a streaming header first (`wav_stream_header()`).
+  `SentenceChunker` (for incremental text such as LLM tokens) is used on the client side,
+  in `examples/chatbot_stream.py`, not by the server.
+- **Kokoro is synchronous**, so its calls are pushed off the event loop (`asyncio.to_thread`
+  for one-shot calls, and a thread plus queue bridge for streaming). Keep that pattern for
+  any blocking backend.
+- **Podcast** (`app/core/podcast.py`): `parse_script` accepts a `turns` list, a JSON string,
+  or a plain `Speaker: text` transcript. `assign_voices` fills in unmapped speakers from the
+  provider's voice catalog. `render` synthesizes turns **one after another** as PCM, then
+  concatenates them with `pause_ms` of silence, peak-normalizes, and encodes once. You can
+  override provider, voice, and instructions per turn.
+- **Jobs** (`app/core/jobs.py`): a SQLite job store that uses the stdlib `sqlite3` from
+  worker threads (not aiosqlite). `JobStore.spawn` runs the render as an in-process asyncio
+  task, and results are written to `output_dir`. Jobs don't survive a process restart
+  mid-render.
 
-**Streaming for chatbot** — a `SentenceChunker` buffers incoming text and flushes on sentence boundaries (`.` `?` `!`, newline, or max-length), so each complete sentence is synthesized and streamed while later text is still arriving. Endpoint yields audio chunks via chunked HTTP / SSE (or WebSocket for bidirectional text-in/audio-out).
+## Testing notes
 
-**Podcast assembly** (`app/core/podcast.py`) — input is a structured script (JSON list of `{speaker, text}` turns) plus a speaker→voice map; optional plain-text parser for `Alice: ...` line format. For each turn: synthesize → decode → append with a configurable inter-turn pause → normalize loudness → export single file. **Optional stretch:** an LLM script generator that turns a topic/article into a two-host dialogue, then feeds it into this pipeline so "make a podcast" is one call.
+- `tests/conftest.py` has an autouse fixture that points `OUTPUT_DIR`/`JOBS_DB` at a tmp
+  dir and clears the `get_settings()` lru_cache. If a test changes settings through env
+  vars, call `get_settings.cache_clear()` so the change takes effect.
+- `asyncio_mode = "auto"`, so async tests need no decorator.
+- Provider network calls are mocked. Tests shouldn't need real keys or the Kokoro model.
 
-## Project structure
+## Repo gotchas
 
-```
-tts/
-  pyproject.toml            # deps + tooling (ruff, pytest)
-  .env.example              # API keys, default provider/voices
-  README.md                 # setup, run, API usage, examples
-  Dockerfile                # python + ffmpeg
-  app/
-    main.py                 # FastAPI app, router wiring, lifespan
-    config.py               # pydantic-settings (keys, defaults)
-    models/schemas.py       # request/response pydantic models
-    api/routes/
-      speech.py             # POST /v1/speech, POST /v1/speech/stream
-      podcast.py            # POST /v1/podcast, GET /v1/jobs/{id}
-      voices.py             # GET /v1/voices
-    core/
-      engine.py             # orchestrator
-      chunker.py            # SentenceChunker for streaming
-      audio.py              # concat / pad / normalize / encode (pydub+ffmpeg)
-      podcast.py            # script parse + multi-speaker assembly
-      jobs.py               # SQLite job store + background worker
-      providers/
-        base.py             # TTSProvider protocol + SynthOpts/Voice
-        openai.py
-        elevenlabs.py
-        registry.py
-  examples/
-    chatbot_stream.py       # LLM tokens -> engine stream -> play audio
-    generate_podcast.py     # script.json -> mp3
-  tests/
-    test_chunker.py  test_audio.py  test_providers.py  test_api.py
-```
+- `kokoro-tts/` is a vendored upstream checkout (its own git repo) used for reference. It's
+  gitignored and excluded from ruff, and the app doesn't import it; the app uses the
+  `kokoro` PyPI package.
+- `DEFAULT_PROVIDER`/`DEFAULT_VOICE` in `.env` override the code default (`kokoro`). Check
+  `.env` before assuming which provider a request with no provider will hit.
+- The first Kokoro synthesis downloads the model and spaCy data, which takes minutes. After
+  that, it's several seconds per sentence on CPU.
+- The ruff `target-version` is `py311`, although the project pins Python 3.12.
 
-## API surface
+## Working agreement
 
-| Method | Path | Purpose |
-|---|---|---|
-| POST | `/v1/speech` | One-shot synth; returns audio file (mp3/wav/opus). Chatbot non-streaming + general use. |
-| POST | `/v1/speech/stream` | Low-latency streaming synth (chunked/SSE); optional WebSocket for token-in/audio-out. Chatbot voice. |
-| POST | `/v1/podcast` | Submit multi-speaker script (or topic); returns a `job_id`. |
-| GET | `/v1/jobs/{id}` | Poll podcast job status; returns audio URL when done. |
-| GET | `/v1/voices` | List voices, filterable by provider. |
-| GET | `/health` | Liveness. |
-
-## Key dependencies
-
-`fastapi`, `uvicorn[standard]`, `pydantic`, `pydantic-settings`, `httpx` (async provider calls), `sse-starlette` (streaming), `pydub` + system **ffmpeg** (audio), `openai` + `elevenlabs` SDKs, `aiosqlite` (jobs); dev: `pytest`, `pytest-asyncio`, `ruff`. Python 3.11+.
-
-## Build phases (incremental, each independently runnable)
-
-1. **Scaffold + first provider** — `pyproject.toml`, `config.py`, provider `base.py` + `openai.py` + `registry.py`, `POST /v1/speech`, `/health`. Verify: synthesize "hello world" to mp3.
-2. **Chatbot streaming** — `chunker.py`, `POST /v1/speech/stream`, `examples/chatbot_stream.py`. Verify: stream a paragraph and confirm audio chunks arrive before input completes.
-3. **Podcast pipeline** — `audio.py`, `podcast.py`, `jobs.py`, `POST /v1/podcast` + `GET /v1/jobs/{id}`, `examples/generate_podcast.py`. Verify: 2-speaker script → single stitched mp3 with pauses.
-4. **Second provider + voices** — `elevenlabs.py`, `GET /v1/voices`, per-speaker provider/voice selection. Verify: same podcast rendered with ElevenLabs voices.
-5. **Polish** — error handling & retries/timeouts on provider calls, request validation, optional response caching, loudness normalization pass, `Dockerfile` (with ffmpeg), `README.md`, tests. *Optional:* LLM podcast-script generator (`topic → dialogue → audio`).
-
-## Design defaults (sensible choices; revisit as needed)
-
-- **Streaming transport:** chunked HTTP + SSE for MVP (simplest for chatbot HTTP clients); add WebSocket only if bidirectional text-in is needed.
-- **Podcast jobs:** in-process background worker + SQLite for MVP; Celery/RQ + object storage is the scale-out path.
-- **Audio storage:** local `./output/` dir served via static route for MVP; S3/GCS for production.
-- **Default formats:** mp3 for downloads, opus/mp3 chunks for streaming, wav internally before encode.
-
-## Verification
-
-- **Unit:** `pytest` — `test_chunker` (sentence boundaries, max-length flush), `test_audio` (concat length = sum + pauses, format round-trip), `test_providers` (mocked httpx), `test_api` (FastAPI `TestClient` on each route).
-- **End-to-end (real keys in `.env`):**
-  - Speech: `curl -X POST /v1/speech -d '{"text":"Hello","voice":"..."}' --output out.mp3` and play it.
-  - Streaming: run `examples/chatbot_stream.py`, confirm first audio plays before the full text is sent.
-  - Podcast: run `examples/generate_podcast.py examples/script.json`, confirm a single mp3 with distinct voices per speaker and pauses between turns.
-- **Docs:** open `/docs` (Swagger) and exercise each endpoint interactively.
+- Update `CONTEXT.md` at the end of each work session with what changed and what's next.
+- Keep `README.md` in sync with the real feature and phase status.
+- Commit working code promptly. Phase 3 and Kokoro once sat uncommitted for about two
+  months.
