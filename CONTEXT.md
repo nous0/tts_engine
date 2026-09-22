@@ -24,6 +24,10 @@ Last checked: 2026-09-21.
 - **ffmpeg isn't installed** on this machine, so only `wav` and `pcm` output work here.
 - **`kokoro-tts/`** (the vendored upstream checkout, which is its own git repo) is now
   gitignored. The app only uses the `kokoro` PyPI package.
+- **Streamlit UI now offers Kokoro** (it previously listed only gemini/openai), with
+  Kokoro's 28 voices. Verified on 2026-09-22 against a live server: Kokoro one-shot and
+  streaming both return 200. The first request after the server starts takes about 40 s
+  because the model loads lazily on first use.
 - README.md was rewritten to match the current state. `.env.example` now documents Kokoro.
 
 ## What's done

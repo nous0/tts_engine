@@ -1,4 +1,4 @@
-"""Streamlit test UI for the TTS engine (Phase 1 + 2).
+"""Streamlit test UI for the TTS engine (speech + streaming, all providers).
 
 Talks to the running FastAPI server over HTTP so it exercises the real API:
 
@@ -31,7 +31,17 @@ except Exception:  # pragma: no cover
         "fable", "nova", "onyx", "sage", "shimmer",
     ]
 
-VOICES: dict[str, list[str]] = {"gemini": list(GEMINI_VOICES), "openai": list(OPENAI_VOICES)}
+try:
+    from app.core.providers.kokoro import KOKORO_VOICES
+except Exception:  # pragma: no cover
+    KOKORO_VOICES = ["af_heart", "af_bella", "am_adam", "am_michael", "bf_emma", "bm_george"]
+
+VOICES: dict[str, list[str]] = {
+    "kokoro": list(KOKORO_VOICES),
+    "gemini": list(GEMINI_VOICES),
+    "openai": list(OPENAI_VOICES),
+}
+DEFAULT_VOICES = {"kokoro": "af_heart", "gemini": "Kore", "openai": "alloy"}
 FORMATS = ["wav", "mp3", "opus", "aac", "flac", "pcm"]
 MEDIA = {
     "wav": "audio/wav",
@@ -44,7 +54,7 @@ MEDIA = {
 
 st.set_page_config(page_title="TTS Engine Tester", page_icon="🔊", layout="centered")
 st.title("🔊 TTS Engine — Test UI")
-st.caption("Phase 1 + 2 · one-shot synthesis and low-latency streaming")
+st.caption("One-shot synthesis and low-latency streaming · kokoro / gemini / openai")
 
 # --------------------------------------------------------------------------- #
 # Sidebar: connection + synthesis options
@@ -53,18 +63,30 @@ with st.sidebar:
     st.header("⚙️ Config")
     base_url = st.text_input("API base URL", "http://127.0.0.1:8000").rstrip("/")
 
-    provider_label = st.selectbox("Provider", ["(server default)", "gemini", "openai"])
+    provider_label = st.selectbox(
+        "Provider", ["(server default)", "kokoro", "gemini", "openai"],
+        help="Server default comes from DEFAULT_PROVIDER in .env.",
+    )
     provider = None if provider_label.startswith("(") else provider_label
 
-    voice_opts = VOICES.get(provider or "gemini", GEMINI_VOICES)
-    default_voice = "Kore" if "Kore" in voice_opts else voice_opts[0]
-    voice = st.selectbox("Voice", voice_opts, index=voice_opts.index(default_voice))
+    if provider is None:
+        # Let the server pick its default voice too: a voice from another provider's
+        # catalog would be rejected.
+        voice = None
+        st.caption("Voice: server default (DEFAULT_VOICE)")
+    else:
+        voice_opts = VOICES[provider]
+        default_voice = DEFAULT_VOICES.get(provider, voice_opts[0])
+        index = voice_opts.index(default_voice) if default_voice in voice_opts else 0
+        voice = st.selectbox("Voice", voice_opts, index=index)
 
     fmt = st.selectbox(
         "Format", FORMATS,
-        help="wav/pcm work without ffmpeg; mp3/opus/... need ffmpeg for Gemini.",
+        help="wav/pcm work without ffmpeg; mp3/opus/aac/flac need ffmpeg (Kokoro/Gemini).",
     )
-    speed = st.slider("Speed", 0.25, 4.0, 1.0, 0.05, help="OpenAI tts-1 only; ignored by Gemini.")
+    speed = st.slider(
+        "Speed", 0.25, 4.0, 1.0, 0.05, help="Used by Kokoro and OpenAI tts-1; ignored by Gemini."
+    )
     instructions = st.text_input("Instructions (style)", "", placeholder="e.g. Say cheerfully")
 
     st.divider()
