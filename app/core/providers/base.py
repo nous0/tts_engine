@@ -18,7 +18,7 @@ class UnsupportedFormat(Exception):
     """Raised when a provider cannot produce the requested audio format.
 
     Typically because a compressed format (mp3/opus/...) was requested from a
-    PCM-only provider (e.g. Gemini) and ffmpeg is not installed for transcoding.
+    PCM-native provider (e.g. Kokoro) and ffmpeg is not installed for transcoding.
     """
 
     def __init__(self, fmt: str, provider: str) -> None:

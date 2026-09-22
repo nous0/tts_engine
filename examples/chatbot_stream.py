@@ -1,6 +1,6 @@
 """Chatbot streaming demo: LLM tokens -> engine stream -> audio.
 
-Run against a real provider key (GEMINI_API_KEY or OPENAI_API_KEY, from .env):
+Run with local Kokoro installed (the "local" extra) or OPENAI_API_KEY in .env:
 
     python examples/chatbot_stream.py
 
@@ -52,8 +52,8 @@ async def main() -> None:
     providers = build_registry(settings)
     if not providers:
         raise SystemExit(
-            "No providers configured. Set GEMINI_API_KEY (or OPENAI_API_KEY) "
-            "in your .env first."
+            "No providers configured. Install Kokoro (uv sync --extra local) "
+            "or set OPENAI_API_KEY in .env."
         )
     engine = TTSEngine(
         providers=providers,

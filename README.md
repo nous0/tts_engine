@@ -4,7 +4,7 @@ A Python/FastAPI backend that wraps TTS providers behind one API. It targets two
 consumers: **chatbot** (low-latency streaming speech) and **podcast** (long-form,
 multi-speaker audio files rendered as background jobs).
 
-**Status:** Phases 1–3 done, Phase 4 partial (Kokoro + Gemini + OpenAI providers;
+**Status:** Phases 1–3 done, Phase 4 partial (Kokoro + OpenAI providers;
 `GET /v1/voices` not built yet), Phase 5 polish not started. See `CONTEXT.md` for the
 current to-do list.
 
@@ -13,7 +13,6 @@ current to-do list.
 | Provider | Kind | Enabled when |
 |---|---|---|
 | `kokoro` (code default) | Local Kokoro-82M on CPU, no key | `local` extra installed and `KOKORO_ENABLED=true` |
-| `gemini` | Google cloud | `GEMINI_API_KEY` set |
 | `openai` | OpenAI cloud | `OPENAI_API_KEY` set |
 
 Only usable providers are registered. Requesting any other returns an error listing the

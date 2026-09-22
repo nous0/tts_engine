@@ -51,7 +51,7 @@ def test_speech_returns_audio():
         resp = client.post("/v1/speech", json={"text": "Hello world"})
     assert resp.status_code == 200
     assert resp.content == b"FAKE_AUDIO"
-    # Default format is now wav (works with Gemini without ffmpeg).
+    # Default format is now wav (works without ffmpeg).
     assert resp.headers["content-type"] == "audio/wav"
 
 

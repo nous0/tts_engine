@@ -9,7 +9,6 @@ from __future__ import annotations
 from app.config import Settings
 
 from .base import TTSProvider
-from .gemini import GeminiProvider
 from .kokoro import KokoroProvider
 from .kokoro import is_installed as kokoro_installed
 from .openai import OpenAIProvider
@@ -22,12 +21,6 @@ def build_registry(settings: Settings) -> dict[str, TTSProvider]:
     # provider list reflects what can actually run.
     if settings.kokoro_enabled and kokoro_installed():
         providers["kokoro"] = KokoroProvider(default_voice=settings.kokoro_voice)
-
-    if settings.gemini_api_key:
-        providers["gemini"] = GeminiProvider(
-            api_key=settings.gemini_api_key,
-            default_model=settings.gemini_tts_model,
-        )
 
     if settings.openai_api_key:
         providers["openai"] = OpenAIProvider(

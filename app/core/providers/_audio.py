@@ -1,6 +1,6 @@
-"""Shared audio helpers for providers that emit raw PCM (Gemini, Kokoro, ...).
+"""Shared audio helpers for providers that emit raw PCM (Kokoro, OpenAI ``pcm``).
 
-Both cloud (Gemini) and local (Kokoro) backends produce 24 kHz, 16-bit, mono PCM.
+The canonical format is 24 kHz, 16-bit, mono PCM.
 These helpers wrap PCM into WAV natively (stdlib ``wave``, no external tools) and,
 when ``ffmpeg`` is on the PATH, transcode to compressed formats (mp3/opus/...).
 

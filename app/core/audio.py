@@ -1,7 +1,7 @@
 """Audio pipeline: concat / pause / normalize / encode for stitched output.
 
-Every provider here can emit raw PCM at 24 kHz, 16-bit, mono — Kokoro and Gemini
-natively, OpenAI via ``response_format="pcm"`` — so the podcast pipeline works in
+Every provider here can emit raw PCM at 24 kHz, 16-bit, mono — Kokoro natively,
+OpenAI via ``response_format="pcm"`` — so the podcast pipeline works in
 that single canonical format: synthesize each turn as PCM, stitch the turns with
 silence, normalize the mix, then encode once at the end.
 

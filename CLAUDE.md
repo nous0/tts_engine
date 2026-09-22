@@ -13,7 +13,8 @@ consumers:
 - **Chatbot streaming**: low-latency, sentence-by-sentence audio over chunked HTTP (`POST /v1/speech/stream`).
 - **Podcast generation**: multi-speaker scripts rendered as a background job and stitched into one file (`POST /v1/podcast` → `GET /v1/jobs/{id}` → `GET /v1/jobs/{id}/audio`).
 
-Providers: **Kokoro** (local, CPU, no key, the configured default), **Gemini**, **OpenAI**.
+Providers: **Kokoro** (local, CPU, no key, the configured default) and **OpenAI**.
+Gemini was removed on 2026-09-22 by decision; ElevenLabs is out of scope.
 `GET /v1/voices` is not built yet; `TTSEngine.list_voices()` already exists for it.
 
 ## Commands
@@ -50,14 +51,14 @@ Request flow: **route → `TTSEngine` → provider → (podcast only) audio pipe
   these from `request.app.state` through small helpers (`_engine(request)`, and so on), not
   FastAPI `Depends`.
 - **Provider registry** (`app/core/providers/registry.py`): a provider is registered only
-  if it can actually run. Gemini and OpenAI need an API key. Kokoro needs `kokoro_enabled`
+  if it can actually run. OpenAI needs an API key. Kokoro needs `kokoro_enabled`
   and the `kokoro` package importable (`kokoro.is_installed()`). If you request an
   unregistered provider, you get `ProviderNotConfigured`, which lists the available ones.
   Adding a provider means implementing the `TTSProvider` protocol in `providers/base.py`
   (`synthesize`, `synthesize_stream`, `list_voices`) and adding a gated entry in
   `build_registry`.
 - **Canonical audio format: 24 kHz, 16-bit, mono PCM** (constants in
-  `providers/_audio.py`). Kokoro and Gemini produce it natively; OpenAI is asked for
+  `providers/_audio.py`). Kokoro produces it natively; OpenAI is asked for
   `response_format="pcm"`. `app/core/audio.py` (concat, silence, normalize, encode) builds
   on the same primitives, so provider output and stitched output always match. Any new
   provider must produce this format when `opts.format == "pcm"`.

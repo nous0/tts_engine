@@ -59,7 +59,7 @@ async def main() -> None:
     if not providers:
         raise SystemExit(
             "No providers configured. Install Kokoro (pip install -e \".[local]\") "
-            "or set GEMINI_API_KEY / OPENAI_API_KEY in .env."
+            "or set OPENAI_API_KEY in .env."
         )
 
     engine = TTSEngine(

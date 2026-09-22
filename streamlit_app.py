@@ -19,11 +19,6 @@ import streamlit as st
 
 # Known voices per provider (imported for the picker; free-text also allowed).
 try:
-    from app.core.providers.gemini import GEMINI_VOICES
-except Exception:  # pragma: no cover - fallback if imports change
-    GEMINI_VOICES = ["Kore", "Zephyr", "Puck", "Charon"]
-
-try:
     from app.core.providers.openai import _OPENAI_VOICES as OPENAI_VOICES
 except Exception:  # pragma: no cover
     OPENAI_VOICES = [
@@ -38,10 +33,9 @@ except Exception:  # pragma: no cover
 
 VOICES: dict[str, list[str]] = {
     "kokoro": list(KOKORO_VOICES),
-    "gemini": list(GEMINI_VOICES),
     "openai": list(OPENAI_VOICES),
 }
-DEFAULT_VOICES = {"kokoro": "af_heart", "gemini": "Kore", "openai": "alloy"}
+DEFAULT_VOICES = {"kokoro": "af_heart", "openai": "alloy"}
 FORMATS = ["wav", "mp3", "opus", "aac", "flac", "pcm"]
 MEDIA = {
     "wav": "audio/wav",
@@ -54,7 +48,7 @@ MEDIA = {
 
 st.set_page_config(page_title="TTS Engine Tester", page_icon="🔊", layout="centered")
 st.title("🔊 TTS Engine — Test UI")
-st.caption("One-shot synthesis and low-latency streaming · kokoro / gemini / openai")
+st.caption("One-shot synthesis and low-latency streaming · kokoro / openai")
 
 # --------------------------------------------------------------------------- #
 # Sidebar: connection + synthesis options
@@ -64,7 +58,7 @@ with st.sidebar:
     base_url = st.text_input("API base URL", "http://127.0.0.1:8000").rstrip("/")
 
     provider_label = st.selectbox(
-        "Provider", ["(server default)", "kokoro", "gemini", "openai"],
+        "Provider", ["(server default)", "kokoro", "openai"],
         help="Server default comes from DEFAULT_PROVIDER in .env.",
     )
     provider = None if provider_label.startswith("(") else provider_label
@@ -82,10 +76,10 @@ with st.sidebar:
 
     fmt = st.selectbox(
         "Format", FORMATS,
-        help="wav/pcm work without ffmpeg; mp3/opus/aac/flac need ffmpeg (Kokoro/Gemini).",
+        help="wav/pcm work without ffmpeg; mp3/opus/aac/flac need ffmpeg for Kokoro.",
     )
     speed = st.slider(
-        "Speed", 0.25, 4.0, 1.0, 0.05, help="Used by Kokoro and OpenAI tts-1; ignored by Gemini."
+        "Speed", 0.25, 4.0, 1.0, 0.05, help="Used by Kokoro and OpenAI tts-1."
     )
     instructions = st.text_input("Instructions (style)", "", placeholder="e.g. Say cheerfully")
 

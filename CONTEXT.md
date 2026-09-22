@@ -16,8 +16,9 @@ Last checked: 2026-09-21.
 - **Podcast pipeline verified end-to-end with Kokoro**: `examples/script.json` rendered
   to `output/script.wav` (45 s, 24 kHz mono, peak about -1 dBFS). The first run took about
   4 minutes because the model downloaded. After that, each turn takes about 6 s on CPU.
-- **Your `.env` sets `DEFAULT_PROVIDER=gemini` / `DEFAULT_VOICE=Kore`**, which overrides
-  the code default (`kokoro`). So in this environment the effective default is Gemini.
+- **Gemini was removed on 2026-09-22** (decision: Kokoro + OpenAI are enough; no
+  ElevenLabs). **Your `.env` must say `DEFAULT_PROVIDER=kokoro` / `DEFAULT_VOICE=af_heart`.**
+  If it still says gemini, requests that don't name a provider fail.
 - **Auto voice assignment picked two female voices** (Alice → `af_heart`, Bob → `af_alloy`),
   because it takes voices in catalog order. Pass `voices` explicitly, or improve
   `assign_voices` to alternate voices.
@@ -59,14 +60,13 @@ Last checked: 2026-09-21.
 
 1. **Build `GET /v1/voices`** (`app/api/routes/voices.py`, backed by the existing
    `TTSEngine.list_voices()`), optionally filtered by provider, to close out Phase 4.
-2. Decide on ElevenLabs: add it, or officially re-scope Phase 4 to Kokoro + Gemini +
-   OpenAI and mark it done.
+2. ~~Decide on ElevenLabs~~: decided. Phase 4 is Kokoro + OpenAI only.
 3. Improve `assign_voices` so auto-assigned speakers sound clearly different.
-4. Optionally, verify a podcast render with Gemini/OpenAI as well (this uses API quota).
+4. Optionally, verify a podcast render with OpenAI as well (this uses API quota).
 
 ## Longer-term (Phase 5 and beyond)
 
-- Error handling & retries/timeouts on provider calls (Gemini/OpenAI network
+- Error handling & retries/timeouts on provider calls (OpenAI network
   failures currently propagate raw).
 - Request validation hardening + optional response caching for repeated
   `/v1/speech` calls.
