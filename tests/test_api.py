@@ -163,6 +163,44 @@ def test_podcast_accepts_plain_text_script():
     assert job["total"] == 2
 
 
+def test_podcast_casts_voices_by_gender():
+    with TestClient(app) as client:
+        _install_fake_engine()  # fake-1 is female, fake-2 is male
+        resp = client.post(
+            "/v1/podcast",
+            json={"script": "Bob: One.\nAlice: Two.", "format": "pcm"},
+        )
+        assert resp.status_code == 202
+        job = _await_job(client, resp.json()["job_id"])
+    assert job["voices"] == {"Bob": "fake-2", "Alice": "fake-1"}
+
+
+def test_podcast_explicit_genders_override_the_name():
+    with TestClient(app) as client:
+        _install_fake_engine()
+        resp = client.post(
+            "/v1/podcast",
+            json={
+                "script": "Host: One.\nBob: Two.",
+                "genders": {"Host": "male", "Bob": "female"},
+                "format": "pcm",
+            },
+        )
+        assert resp.status_code == 202
+        job = _await_job(client, resp.json()["job_id"])
+    assert job["voices"] == {"Host": "fake-2", "Bob": "fake-1"}
+
+
+def test_podcast_rejects_unknown_gender():
+    with TestClient(app) as client:
+        _install_fake_engine()
+        resp = client.post(
+            "/v1/podcast",
+            json={"script": "Host: One.", "genders": {"Host": "robot"}},
+        )
+    assert resp.status_code == 422
+
+
 def test_podcast_requires_turns_or_script():
     with TestClient(app) as client:
         _install_fake_engine()

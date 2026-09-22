@@ -4,8 +4,8 @@ A Python/FastAPI backend that wraps TTS providers behind one API. It targets two
 consumers: **chatbot** (low-latency streaming speech) and **podcast** (long-form,
 multi-speaker audio files rendered as background jobs).
 
-**Status:** Phases 1–3 done, Phase 4 partial (Kokoro + OpenAI providers;
-`GET /v1/voices` not built yet), Phase 5 polish not started. See `CONTEXT.md` for the
+**Status:** Phases 1–4 done (Kokoro + OpenAI providers, `GET /v1/voices`, gender-aware
+podcast casting). Phase 5 polish not started. See `CONTEXT.md` for the
 current to-do list.
 
 ## Providers
@@ -92,8 +92,19 @@ publishes no gender metadata, so its genders are perceived ones, and `alloy` is 
 ### Podcast
 
 Send either `turns` (`[{"speaker": "Alice", "text": "..."}]`) or a plain-text `script`
-(`Alice: ...` lines). `voices` (a speaker → voice map) is optional. Speakers you don't map
-get voices from the provider's catalog automatically.
+(`Alice: ...` lines). `voices` (a speaker → voice map) is optional.
+
+Speakers you don't map are **cast automatically by gender**:
+- The gender is guessed from the name, using common English and Vietnamese names,
+  Vietnamese middle names such as `Thị` and `Văn`, and titles such as `Mr` and `Chị`.
+  Examples: Alice → female, Bob → male, `Nguyễn Thị Lan` → female.
+- Each speaker gets a different voice of that gender, so two women and one man get three
+  distinct voices. A speaker keeps the same voice for the whole episode.
+- If a name gives no clue (`Host`, `Guest`), the speaker gets whichever gender keeps the
+  cast balanced.
+- You can set a gender yourself with `genders`, for example
+  `{"Host": "female"}`. `voices` still wins over everything.
+- The chosen map is returned as `voices` in `GET /v1/jobs/{id}`.
 
 ```bash
 curl -X POST http://127.0.0.1:8000/v1/podcast \
@@ -108,6 +119,7 @@ curl http://127.0.0.1:8000/v1/jobs/<job_id>/audio --output podcast.wav
 
 ```bash
 uv run python examples/chatbot_stream.py                                   # simulated LLM tokens -> streaming audio
+uv run python examples/generate_podcast.py examples/script_trio.txt --provider kokoro   # 3 speakers (2 female, 1 male)
 uv run python examples/generate_podcast.py examples/script.json --provider kokoro   # -> output/script.wav
 ```
 

@@ -22,7 +22,8 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from . import audio
-from .providers.base import SynthOpts
+from .names import guess_gender
+from .providers.base import Gender, SynthOpts, Voice
 
 # "Alice: text" — a speaker label is a short leading token before the colon.
 _SPEAKER_LINE = re.compile(r"^([^:\n]{1,60}?)\s*:\s*(.+)$")
@@ -90,13 +91,18 @@ def speakers(turns: Sequence[Turn]) -> list[str]:
 def assign_voices(
     turns: Sequence[Turn],
     voices: dict[str, str] | None,
-    catalog: Sequence[str],
+    catalog: Sequence[Voice],
+    genders: dict[str, Gender] | None = None,
 ) -> dict[str, str]:
-    """Complete the speaker -> voice map, giving unassigned speakers distinct voices.
+    """Complete the speaker -> voice map, casting each speaker by gender.
 
-    Explicit assignments always win. Remaining speakers take unused voices from
-    ``catalog`` so a two-host show sounds like two people with no configuration;
-    once the catalog runs out, voices are reused in order.
+    Explicit ``voices`` always win. Every other speaker, in first-appearance order,
+    gets a gender (explicit ``genders`` > guessed from the name > whichever gender is
+    less represented so far) and then the first *unused* catalog voice of that
+    gender, so two women and a man get three distinct, fitting voices. Catalogs are
+    expected to list their best voices first. When a gender runs out, any unused
+    voice is taken; only once every voice is taken are voices reused, least-used
+    first. Each speaker keeps one voice for the whole episode.
     """
     assigned = dict(voices or {})
     missing = [name for name in speakers(turns) if name not in assigned]
@@ -108,10 +114,46 @@ def assign_voices(
             "provider that lists voices."
         )
 
-    pool = [v for v in catalog if v not in set(assigned.values())] or list(catalog)
-    for index, name in enumerate(missing):
-        assigned[name] = pool[index % len(pool)]
+    gender_of = {v.id: v.gender for v in catalog}
+    usage = {v.id: 0 for v in catalog}
+    counts: dict[Gender, int] = {"female": 0, "male": 0}
+    last: Gender | None = None
+    for voice_id in assigned.values():
+        if voice_id in usage:
+            usage[voice_id] += 1
+        if (g := gender_of.get(voice_id)) is not None:
+            counts[g] += 1
+            last = g
+
+    for name in missing:
+        gender = (genders or {}).get(name) or guess_gender(name)
+        if gender is None:
+            gender = _balancing_gender(counts, last)
+        voice = _pick_voice(catalog, usage, gender)
+        assigned[name] = voice.id
+        usage[voice.id] += 1
+        cast_as = voice.gender or gender
+        counts[cast_as] += 1
+        last = cast_as
     return assigned
+
+
+def _balancing_gender(counts: dict[Gender, int], last: Gender | None) -> Gender:
+    """For a speaker of unknown gender: the rarer gender, alternating on ties."""
+    if counts["female"] != counts["male"]:
+        return "female" if counts["female"] < counts["male"] else "male"
+    return "male" if last == "female" else "female"
+
+
+def _pick_voice(catalog: Sequence[Voice], usage: dict[str, int], gender: Gender) -> Voice:
+    matching = [v for v in catalog if v.gender == gender]
+    for pool in (matching, catalog):
+        for voice in pool:
+            if usage[voice.id] == 0:
+                return voice
+    # Everything is taken: reuse the least-used voice, preferring the right gender.
+    pool = matching or list(catalog)
+    return min(pool, key=lambda v: usage[v.id])
 
 
 async def render(

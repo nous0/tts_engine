@@ -19,9 +19,12 @@ Last checked: 2026-09-21.
 - **Gemini was removed on 2026-09-22** (decision: Kokoro + OpenAI are enough; no
   ElevenLabs). **Your `.env` must say `DEFAULT_PROVIDER=kokoro` / `DEFAULT_VOICE=af_heart`.**
   If it still says gemini, requests that don't name a provider fail.
-- **Auto voice assignment picked two female voices** (Alice → `af_heart`, Bob → `af_alloy`),
-  because it takes voices in catalog order. Pass `voices` explicitly, or improve
-  `assign_voices` to alternate voices.
+- **Phase 4 finished on 2026-09-22.** Shipped `GET /v1/voices` (filter by `provider` and
+  `gender`) and gender-aware podcast casting. Verified with Kokoro:
+  - `script.json`: Alice → `af_heart`, Bob → `am_michael`.
+  - `script_trio.txt`: Alice/Emma/David → `af_heart`/`af_bella`/`am_michael`.
+  - Over the API: `Nguyễn Thị Lan` → female, `Trần Văn Minh` → male, and `Host` balanced.
+  137 tests pass.
 - **ffmpeg isn't installed** on this machine, so only `wav` and `pcm` output work here.
 - **`kokoro-tts/`** (the vendored upstream checkout, which is its own git repo) is now
   gitignored. The app only uses the `kokoro` PyPI package.
@@ -33,24 +36,19 @@ Last checked: 2026-09-21.
 
 ## What's done
 
-- Phase 1–2: provider abstraction, Gemini + OpenAI providers, `/v1/speech`,
+- Phase 1–2: provider abstraction, OpenAI provider, `/v1/speech`,
   `/v1/speech/stream`, sentence chunker, `/health`. Committed.
 - Phase 3: `audio.py` (concat/normalize/encode), `podcast.py` (script
   parsing + rendering), `jobs.py` (SQLite job store + async worker),
   `POST /v1/podcast`, `GET /v1/jobs/{id}`, `GET /v1/jobs`,
   `GET /v1/jobs/{id}/audio`, `examples/generate_podcast.py`. Committed and
   verified end-to-end with Kokoro.
-- Phase 4 (partial): Kokoro local provider, fully wired into the registry
-  and set as default. Per-speaker provider/voice override already works in
-  the podcast request schema.
+- Phase 4: Kokoro local provider (the default), `GET /v1/voices` with per-voice
+  gender, podcast casting by name gender (`app/core/names.py`) with a `genders`
+  override, and a Streamlit voice picker fed by `/v1/voices`. Gemini was removed.
 
 ## What's not done
 
-- `GET /v1/voices` endpoint (`app/api/routes/voices.py` doesn't exist yet;
-  `TTSEngine.list_voices()` exists internally but nothing exposes it over
-  HTTP).
-- ElevenLabs provider — skipped in favor of Kokoro; open decision whether to
-  still add it or consider Phase 4 satisfied by Kokoro + Gemini + OpenAI.
 - Phase 5 polish: no retries/timeouts around provider calls, no request-level
   caching, no `Dockerfile`, no static route serving `./output/`.
 - Optional LLM podcast-script generator (topic → dialogue → audio) — not
@@ -58,11 +56,13 @@ Last checked: 2026-09-21.
 
 ## Immediate to-dos (in rough priority order)
 
-1. **Build `GET /v1/voices`** (`app/api/routes/voices.py`, backed by the existing
-   `TTSEngine.list_voices()`), optionally filtered by provider, to close out Phase 4.
-2. ~~Decide on ElevenLabs~~: decided. Phase 4 is Kokoro + OpenAI only.
-3. Improve `assign_voices` so auto-assigned speakers sound clearly different.
-4. Optionally, verify a podcast render with OpenAI as well (this uses API quota).
+1. **Listen** to `output/script.wav` and `output/script_trio.wav` and confirm the voices
+   sound right and distinct. Tests can't check this.
+2. **Start Phase 5**: add retries and timeouts around OpenAI calls, then a `Dockerfile` with
+   ffmpeg, a static route for `./output/`, and optional response caching.
+3. Optionally, verify a podcast render with OpenAI (this uses API quota).
+4. The name table in `app/core/names.py` is intentionally small. Add names when real
+   scripts show misses; users can always pass `genders`.
 
 ## Longer-term (Phase 5 and beyond)
 

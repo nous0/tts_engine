@@ -7,7 +7,7 @@ Runs the podcast pipeline directly (no HTTP server needed):
 
 The script may be JSON (a list of ``{"speaker": ..., "text": ...}`` objects) or
 plain text with ``Alice: ...`` lines. Speakers without an explicit voice are
-assigned distinct voices from the provider's catalog.
+cast automatically by gender (guessed from the name, or set with --gender).
 """
 
 from __future__ import annotations
@@ -39,6 +39,13 @@ def parse_args() -> argparse.Namespace:
         metavar="SPEAKER=VOICE",
         help="Pin a speaker to a voice; repeatable.",
     )
+    parser.add_argument(
+        "--gender",
+        action="append",
+        default=[],
+        metavar="SPEAKER=female|male",
+        help="Set a speaker's gender when the name can't be guessed; repeatable.",
+    )
     return parser.parse_args()
 
 
@@ -50,6 +57,16 @@ def parse_voice_flags(pairs: list[str]) -> dict[str, str]:
             raise SystemExit(f"Invalid --voice '{pair}'; expected SPEAKER=VOICE.")
         voices[speaker] = voice
     return voices
+
+
+def parse_gender_flags(pairs: list[str]) -> dict[str, str]:
+    genders: dict[str, str] = {}
+    for pair in pairs:
+        speaker, _, gender = pair.partition("=")
+        if not speaker or gender not in ("female", "male"):
+            raise SystemExit(f"Invalid --gender '{pair}'; expected SPEAKER=female|male.")
+        genders[speaker] = gender
+    return genders
 
 
 async def main() -> None:
@@ -71,12 +88,13 @@ async def main() -> None:
     turns = podcast_core.parse_script(args.script.read_text(encoding="utf-8"))
     catalog = await engine.list_voices(args.provider)
     voices = podcast_core.assign_voices(
-        turns, parse_voice_flags(args.voice), [v.id for v in catalog]
+        turns, parse_voice_flags(args.voice), catalog, parse_gender_flags(args.gender)
     )
 
     print(f"Script: {len(turns)} turns, {len(voices)} speakers")
+    gender_of = {v.id: v.gender for v in catalog}
     for speaker, voice in voices.items():
-        print(f"  {speaker:<12} -> {voice}")
+        print(f"  {speaker:<12} -> {voice} ({gender_of.get(voice) or 'neutral'})")
 
     spec = PodcastSpec(
         turns=turns,

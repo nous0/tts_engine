@@ -1,0 +1,6 @@
+Alice: Welcome back to Sound Bytes. Today I have two guests with me.
+Emma: Thanks for having me, Alice. I work on speech models.
+David: And I build the apps that use them. Happy to be here.
+Alice: Emma, what changed in text to speech recently?
+Emma: Models now generate the waveform directly, so voices sound far more natural.
+David: Which means every app can finally talk like a person. Thanks for listening!

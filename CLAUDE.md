@@ -71,8 +71,11 @@ Request flow: **route → `TTSEngine` → provider → (podcast only) audio pipe
   for one-shot calls, and a thread plus queue bridge for streaming). Keep that pattern for
   any blocking backend.
 - **Podcast** (`app/core/podcast.py`): `parse_script` accepts a `turns` list, a JSON string,
-  or a plain `Speaker: text` transcript. `assign_voices` fills in unmapped speakers from the
-  provider's voice catalog. `render` synthesizes turns **one after another** as PCM, then
+  or a plain `Speaker: text` transcript. `assign_voices` casts unmapped speakers by gender:
+  explicit `genders`, then `app/core/names.py:guess_gender` (a lookup table, which returns
+  `None` when unsure), then whichever gender balances the cast. Each speaker gets the first
+  *unused* catalog voice of that gender, so catalogs must list their best voices first and
+  tag `Voice.gender`. `render` synthesizes turns **one after another** as PCM, then
   concatenates them with `pause_ms` of silence, peak-normalizes, and encodes once. You can
   override provider, voice, and instructions per turn.
 - **Jobs** (`app/core/jobs.py`): a SQLite job store that uses the stdlib `sqlite3` from

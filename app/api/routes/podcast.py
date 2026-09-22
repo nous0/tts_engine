@@ -62,7 +62,7 @@ async def _resolve_voices(
     if all(t.voice or req.voices.get(t.speaker) for t in turns):
         return dict(req.voices)
     catalog = await engine.list_voices(req.provider)
-    return podcast_core.assign_voices(turns, req.voices, [v.id for v in catalog])
+    return podcast_core.assign_voices(turns, req.voices, catalog, req.genders)
 
 
 def _job_response(job: Job) -> JobResponse:

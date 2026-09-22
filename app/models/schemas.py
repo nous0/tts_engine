@@ -57,8 +57,9 @@ class PodcastRequest(BaseModel):
     """Submit a multi-speaker script for background rendering.
 
     Provide either structured ``turns`` or a plain-text ``script`` using
-    ``Alice: line`` lines. Speakers without an entry in ``voices`` are assigned
-    distinct provider voices automatically.
+    ``Alice: line`` lines. Speakers without an entry in ``voices`` are cast
+    automatically: each gets a distinct voice matching their gender, taken from
+    ``genders`` or guessed from the name (Alice -> female, Bob -> male).
     """
 
     turns: list[PodcastTurn] | None = Field(None, max_length=500)
@@ -67,6 +68,10 @@ class PodcastRequest(BaseModel):
     )
     voices: dict[str, str] = Field(
         default_factory=dict, description="Speaker name -> provider voice id."
+    )
+    genders: dict[str, Gender] = Field(
+        default_factory=dict,
+        description="Speaker name -> 'female'/'male', for names that can't be guessed.",
     )
     provider: str | None = Field(None, description="Provider name; falls back to default.")
     format: AudioFormat = "wav"

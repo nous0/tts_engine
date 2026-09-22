@@ -16,7 +16,7 @@ from app.core.podcast import (
     render,
     speakers,
 )
-from app.core.providers.base import SynthOpts
+from app.core.providers.base import SynthOpts, Voice
 from tests.test_audio import tone
 
 
@@ -88,22 +88,100 @@ def test_speakers_preserves_first_appearance_order():
     assert speakers(turns) == ["Bob", "Alice"]
 
 
-def test_assign_voices_gives_distinct_voices():
-    turns = parse_script("Alice: One.\nBob: Two.")
-    mapping = assign_voices(turns, None, ["v1", "v2", "v3"])
-    assert mapping["Alice"] != mapping["Bob"]
+def _voice(voice_id: str, gender: str | None = None) -> Voice:
+    return Voice(id=voice_id, name=voice_id, provider="test", gender=gender)
+
+
+# Best-first, like a real catalog: three women, two men, one neutral voice.
+CATALOG = [
+    _voice("f1", "female"),
+    _voice("f2", "female"),
+    _voice("f3", "female"),
+    _voice("m1", "male"),
+    _voice("m2", "male"),
+    _voice("n1"),
+]
+
+
+def test_assign_voices_casts_by_name_gender():
+    turns = parse_script("Alice: One.\nBob: Two.\nAlice: Three.")
+    mapping = assign_voices(turns, None, CATALOG)
+    assert mapping == {"Alice": "f1", "Bob": "m1"}
+
+
+def test_assign_voices_is_not_just_first_appearance_order():
+    # Bob speaks first but still gets a male voice, not the catalog's first voice.
+    turns = parse_script("Bob: One.\nAlice: Two.")
+    assert assign_voices(turns, None, CATALOG) == {"Bob": "m1", "Alice": "f1"}
+
+
+def test_assign_voices_gives_same_gender_speakers_distinct_voices():
+    turns = parse_script("Alice: 1.\nBob: 2.\nEmma: 3.")
+    mapping = assign_voices(turns, None, CATALOG)
+    assert mapping == {"Alice": "f1", "Bob": "m1", "Emma": "f2"}
+    assert len(set(mapping.values())) == 3
+
+
+def test_assign_voices_handles_vietnamese_names():
+    turns = parse_script("Nguyễn Thị Hoa: 1.\nTrần Văn Minh: 2.\nHương: 3.")
+    mapping = assign_voices(turns, None, CATALOG)
+    assert mapping == {"Nguyễn Thị Hoa": "f1", "Trần Văn Minh": "m1", "Hương": "f2"}
+
+
+def test_assign_voices_explicit_gender_beats_the_name():
+    turns = parse_script("Alice: 1.\nHost: 2.")
+    mapping = assign_voices(turns, None, CATALOG, genders={"Alice": "male", "Host": "female"})
+    assert mapping == {"Alice": "m1", "Host": "f1"}
+
+
+def test_assign_voices_balances_unknown_names():
+    turns = parse_script("Host: 1.\nGuest: 2.\nCaller: 3.\nProducer: 4.")
+    mapping = assign_voices(turns, None, CATALOG)
+    assert mapping == {"Host": "f1", "Guest": "m1", "Caller": "f2", "Producer": "m2"}
+
+
+def test_assign_voices_unknown_name_evens_out_known_ones():
+    turns = parse_script("Alice: 1.\nEmma: 2.\nHost: 3.")
+    mapping = assign_voices(turns, None, CATALOG)
+    assert mapping["Host"] == "m1"
 
 
 def test_assign_voices_respects_explicit_map():
-    turns = parse_script("Alice: One.\nBob: Two.")
-    mapping = assign_voices(turns, {"Alice": "pinned"}, ["pinned", "v2"])
-    assert mapping["Alice"] == "pinned"
-    assert mapping["Bob"] == "v2"
+    turns = parse_script("Alice: One.\nEmma: Two.")
+    mapping = assign_voices(turns, {"Alice": "f1"}, CATALOG)
+    # Alice's pinned voice is not handed out again.
+    assert mapping == {"Alice": "f1", "Emma": "f2"}
+
+
+def test_assign_voices_explicit_map_counts_toward_balance():
+    turns = parse_script("Alice: 1.\nHost: 2.")
+    assert assign_voices(turns, {"Alice": "f1"}, CATALOG)["Host"] == "m1"
+
+
+def test_assign_voices_takes_other_voices_when_a_gender_runs_out():
+    turns = parse_script("Bob: 1.\nDavid: 2.\nJohn: 3.")
+    mapping = assign_voices(turns, None, CATALOG)
+    assert mapping["Bob"] == "m1" and mapping["David"] == "m2"
+    # No male voice left: John still gets an unused voice rather than a repeat.
+    assert mapping["John"] not in {"m1", "m2"}
+
+
+def test_assign_voices_reuses_least_used_once_exhausted():
+    small = [_voice("f1", "female"), _voice("m1", "male")]
+    turns = parse_script("Alice: 1.\nBob: 2.\nEmma: 3.\nDavid: 4.")
+    mapping = assign_voices(turns, None, small)
+    assert mapping == {"Alice": "f1", "Bob": "m1", "Emma": "f1", "David": "m1"}
+
+
+def test_assign_voices_works_with_an_untagged_catalog():
+    catalog = [_voice("v1"), _voice("v2"), _voice("v3")]
+    turns = parse_script("Alice: 1.\nBob: 2.\nEmma: 3.")
+    assert assign_voices(turns, None, catalog) == {"Alice": "v1", "Bob": "v2", "Emma": "v3"}
 
 
 def test_assign_voices_wraps_when_pool_is_small():
     turns = parse_script("A: 1.\nB: 2.\nC: 3.")
-    mapping = assign_voices(turns, None, ["only"])
+    mapping = assign_voices(turns, None, [_voice("only")])
     assert set(mapping.values()) == {"only"}
 
 
