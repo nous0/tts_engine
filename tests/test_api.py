@@ -31,8 +31,8 @@ class FakeProvider:
 
     async def list_voices(self) -> list[Voice]:
         return [
-            Voice(id="fake-1", name="Fake One", provider=self.name),
-            Voice(id="fake-2", name="Fake Two", provider=self.name),
+            Voice(id="fake-1", name="Fake One", provider=self.name, gender="female"),
+            Voice(id="fake-2", name="Fake Two", provider=self.name, gender="male"),
         ]
 
 
@@ -215,3 +215,67 @@ def test_list_jobs_returns_submitted_jobs():
         _await_job(client, submitted["job_id"])
         jobs = client.get("/v1/jobs").json()
     assert any(j["job_id"] == submitted["job_id"] for j in jobs)
+
+
+class OtherFakeProvider(FakeProvider):
+    name = "other"
+
+    async def list_voices(self) -> list[Voice]:
+        return [Voice(id="other-1", name="Other One", provider=self.name, gender="male")]
+
+
+def _install_two_providers() -> None:
+    app.state.engine = TTSEngine(
+        {"fake": FakeProvider(), "other": OtherFakeProvider()},
+        default_provider="fake",
+        default_voice="fake-1",
+    )
+
+
+def test_voices_lists_every_registered_provider():
+    with TestClient(app) as client:
+        _install_two_providers()
+        resp = client.get("/v1/voices")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["default_provider"] == "fake"
+    assert body["providers"] == ["fake", "other"]
+    assert [v["id"] for v in body["voices"]] == ["fake-1", "fake-2", "other-1"]
+    assert body["voices"][0] == {
+        "id": "fake-1",
+        "name": "Fake One",
+        "provider": "fake",
+        "language": None,
+        "gender": "female",
+    }
+
+
+def test_voices_filters_by_provider():
+    with TestClient(app) as client:
+        _install_two_providers()
+        resp = client.get("/v1/voices", params={"provider": "other"})
+    assert resp.status_code == 200
+    assert [v["id"] for v in resp.json()["voices"]] == ["other-1"]
+
+
+def test_voices_filters_by_gender():
+    with TestClient(app) as client:
+        _install_two_providers()
+        resp = client.get("/v1/voices", params={"gender": "male"})
+    assert resp.status_code == 200
+    assert [v["id"] for v in resp.json()["voices"]] == ["fake-2", "other-1"]
+
+
+def test_voices_unconfigured_provider_returns_400():
+    with TestClient(app) as client:
+        _install_two_providers()
+        resp = client.get("/v1/voices", params={"provider": "openai"})
+    assert resp.status_code == 400
+    assert "not configured" in resp.json()["detail"]
+
+
+def test_voices_rejects_unknown_gender():
+    with TestClient(app) as client:
+        _install_two_providers()
+        resp = client.get("/v1/voices", params={"gender": "robot"})
+    assert resp.status_code == 422

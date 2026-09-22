@@ -1,7 +1,7 @@
 """OpenAI TTS provider.
 
-Uses the official async SDK's ``audio.speech.create`` endpoint. Streaming is a
-placeholder here and gets a real implementation in Phase 2.
+Uses the official async SDK's ``audio.speech.create`` endpoint, and its streaming
+response variant for ``synthesize_stream``.
 """
 
 from __future__ import annotations
@@ -10,7 +10,7 @@ from collections.abc import AsyncIterator
 
 from openai import AsyncOpenAI
 
-from .base import SynthOpts, Voice
+from .base import Gender, SynthOpts, Voice
 
 # OpenAI does not expose a "list voices" endpoint, so we ship a static catalog.
 _OPENAI_VOICES = [
@@ -25,6 +25,20 @@ _OPENAI_VOICES = [
     "sage",
     "shimmer",
 ]
+
+# OpenAI publishes no gender metadata; these are perceived genders, used only to cast
+# podcast speakers. ``alloy`` sounds neutral and is left untagged.
+_OPENAI_GENDERS: dict[str, Gender] = {
+    "coral": "female",
+    "nova": "female",
+    "sage": "female",
+    "shimmer": "female",
+    "ash": "male",
+    "ballad": "male",
+    "echo": "male",
+    "fable": "male",
+    "onyx": "male",
+}
 
 
 class OpenAIProvider:
@@ -78,5 +92,11 @@ class OpenAIProvider:
 
     async def list_voices(self) -> list[Voice]:
         return [
-            Voice(id=v, name=v.capitalize(), provider=self.name) for v in _OPENAI_VOICES
+            Voice(
+                id=v,
+                name=v.capitalize(),
+                provider=self.name,
+                gender=_OPENAI_GENDERS.get(v),
+            )
+            for v in _OPENAI_VOICES
         ]

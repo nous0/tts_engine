@@ -15,7 +15,7 @@ consumers:
 
 Providers: **Kokoro** (local, CPU, no key, the configured default) and **OpenAI**.
 Gemini was removed on 2026-09-22 by decision; ElevenLabs is out of scope.
-`GET /v1/voices` is not built yet; `TTSEngine.list_voices()` already exists for it.
+`GET /v1/voices` lists voices with a `gender` (`Voice.gender` in `providers/base.py`), which podcast casting relies on.
 
 ## Commands
 

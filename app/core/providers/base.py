@@ -8,10 +8,11 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
-from typing import Protocol, runtime_checkable
+from typing import Literal, Protocol, runtime_checkable
 
 # Audio container formats the engine understands.
 AudioFormat = str  # "mp3" | "wav" | "opus" | "aac" | "flac" | "pcm"
+Gender = Literal["female", "male"]
 
 
 class UnsupportedFormat(Exception):
@@ -48,6 +49,7 @@ class Voice:
     name: str
     provider: str
     language: str | None = None
+    gender: Gender | None = None  # perceived voice gender; None when neutral/unknown
     tags: list[str] = field(default_factory=list)
 
 

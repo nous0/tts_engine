@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field, model_validator
 
 AudioFormat = Literal["mp3", "wav", "opus", "aac", "flac", "pcm"]
 JobState = Literal["queued", "running", "done", "error"]
+Gender = Literal["female", "male"]
 
 
 class SpeechRequest(BaseModel):
@@ -104,3 +105,21 @@ class JobResponse(BaseModel):
     voices: dict[str, str] = Field(
         default_factory=dict, description="Resolved speaker -> voice map."
     )
+
+
+class VoiceInfo(BaseModel):
+    """One voice offered by a provider."""
+
+    id: str
+    name: str
+    provider: str
+    language: str | None = None
+    gender: Gender | None = Field(None, description="Perceived gender; null if neutral.")
+
+
+class VoicesResponse(BaseModel):
+    """Voice catalog across the registered providers."""
+
+    default_provider: str
+    providers: list[str] = Field(description="Registered (usable) providers.")
+    voices: list[VoiceInfo]

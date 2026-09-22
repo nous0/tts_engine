@@ -7,7 +7,7 @@ from pathlib import Path
 
 from fastapi import FastAPI
 
-from app.api.routes import podcast, speech
+from app.api.routes import podcast, speech, voices
 from app.config import get_settings
 from app.core.engine import TTSEngine
 from app.core.jobs import JobStore
@@ -40,6 +40,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="TTS Engine", version="0.1.0", lifespan=lifespan)
 app.include_router(speech.router)
 app.include_router(podcast.router)
+app.include_router(voices.router)
 
 
 @app.get("/health", tags=["meta"])

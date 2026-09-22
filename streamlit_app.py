@@ -17,7 +17,7 @@ import time
 import httpx
 import streamlit as st
 
-# Known voices per provider (imported for the picker; free-text also allowed).
+# Fallback voice lists, used only when GET /v1/voices can't be reached.
 try:
     from app.core.providers.openai import _OPENAI_VOICES as OPENAI_VOICES
 except Exception:  # pragma: no cover
@@ -46,6 +46,20 @@ MEDIA = {
     "pcm": "audio/L16",
 }
 
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def fetch_voices(base_url: str, provider: str) -> dict[str, str | None] | None:
+    """Voice id -> gender from GET /v1/voices, or None if the server can't be reached."""
+    try:
+        r = httpx.get(f"{base_url}/v1/voices", params={"provider": provider}, timeout=5)
+    except httpx.HTTPError:
+        return None
+    if r.status_code != 200:
+        return None
+    return {v["id"]: v.get("gender") for v in r.json()["voices"]} or None
+
+
 st.set_page_config(page_title="TTS Engine Tester", page_icon="🔊", layout="centered")
 st.title("🔊 TTS Engine — Test UI")
 st.caption("One-shot synthesis and low-latency streaming · kokoro / openai")
@@ -69,10 +83,19 @@ with st.sidebar:
         voice = None
         st.caption("Voice: server default (DEFAULT_VOICE)")
     else:
-        voice_opts = VOICES[provider]
+        catalog = fetch_voices(base_url, provider)
+        if catalog is None:
+            st.caption("⚠️ Couldn't load /v1/voices; showing the built-in list.")
+            catalog = {v: None for v in VOICES[provider]}
+        voice_opts = list(catalog)
         default_voice = DEFAULT_VOICES.get(provider, voice_opts[0])
         index = voice_opts.index(default_voice) if default_voice in voice_opts else 0
-        voice = st.selectbox("Voice", voice_opts, index=index)
+        voice = st.selectbox(
+            "Voice",
+            voice_opts,
+            index=index,
+            format_func=lambda v: f"{v} ({catalog[v]})" if catalog.get(v) else v,
+        )
 
     fmt = st.selectbox(
         "Format", FORMATS,

@@ -1,8 +1,7 @@
 """Engine orchestrator: routes requests to a provider and applies defaults.
 
-Phase 1 covers one-shot synthesis and voice listing. Phase 2 adds streaming
-synthesis driven by the sentence chunker. Podcast assembly and jobs land in
-later phases.
+Covers one-shot synthesis, sentence-by-sentence streaming, and voice listing.
+Podcast assembly lives in ``podcast.py`` and uses the engine for each turn.
 """
 
 from __future__ import annotations
@@ -33,6 +32,14 @@ class TTSEngine:
         self._providers = providers
         self._default_provider = default_provider
         self._default_voice = default_voice
+
+    @property
+    def default_provider(self) -> str:
+        return self._default_provider
+
+    def provider_names(self) -> list[str]:
+        """Names of the registered (usable) providers, sorted."""
+        return sorted(self._providers)
 
     def get_provider(self, name: str | None = None) -> TTSProvider:
         name = name or self._default_provider

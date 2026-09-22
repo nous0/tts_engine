@@ -27,22 +27,33 @@ from ._audio import (
     pcm_to_wav,
     wav_stream_header,
 )
-from .base import SynthOpts, UnsupportedFormat, Voice
+from .base import Gender, SynthOpts, UnsupportedFormat, Voice
 
-# American (af_/am_) and British (bf_/bm_) English voices shipped with Kokoro.
+# American (a) and British (b) English voices shipped with Kokoro; the second letter
+# is the voice's gender (f/m). Within each gender, voices are ordered roughly by the
+# upstream quality grades so automatic podcast casting picks the best ones first.
 KOKORO_VOICES = [
-    "af_heart", "af_alloy", "af_aoede", "af_bella", "af_jessica", "af_kore",
-    "af_nicole", "af_nova", "af_river", "af_sarah", "af_sky",
-    "am_adam", "am_echo", "am_eric", "am_fenrir", "am_liam", "am_michael",
-    "am_onyx", "am_puck", "am_santa",
-    "bf_alice", "bf_emma", "bf_isabella", "bf_lily",
-    "bm_daniel", "bm_fable", "bm_george", "bm_lewis",
+    "af_heart", "af_bella", "af_nicole", "bf_emma", "af_aoede", "af_kore", "af_sarah",
+    "af_alloy", "af_nova", "af_sky", "af_jessica", "af_river",
+    "bf_isabella", "bf_alice", "bf_lily",
+    "am_michael", "am_fenrir", "am_puck", "bm_george", "bm_fable", "am_echo", "am_eric",
+    "am_liam", "am_onyx", "am_adam", "bm_lewis", "bm_daniel", "am_santa",
 ]
 
 
 def is_installed() -> bool:
     """True if the ``kokoro`` package is importable (no heavy import performed)."""
     return importlib.util.find_spec("kokoro") is not None
+
+
+def voice_gender(voice: str) -> Gender | None:
+    """Gender encoded in a Kokoro voice id (``af_*`` female, ``am_*`` male)."""
+    return {"f": "female", "m": "male"}.get(voice[1:2])
+
+
+def voice_language(voice: str) -> str:
+    """Locale encoded in a Kokoro voice id (``b*`` British, otherwise American)."""
+    return "en-GB" if voice[:1] == "b" else "en-US"
 
 
 def _lang_code_for(voice: str) -> str:
@@ -147,7 +158,14 @@ class KokoroProvider:
 
     async def list_voices(self) -> list[Voice]:
         return [
-            Voice(id=v, name=v, provider=self.name, language="en") for v in KOKORO_VOICES
+            Voice(
+                id=v,
+                name=v,
+                provider=self.name,
+                language=voice_language(v),
+                gender=voice_gender(v),
+            )
+            for v in KOKORO_VOICES
         ]
 
     async def _encode(self, pcm: bytes, fmt: str) -> bytes:

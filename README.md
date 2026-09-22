@@ -49,6 +49,7 @@ uv run streamlit run streamlit_app.py      # optional browser test UI
 | GET | `/v1/jobs` | List recent jobs |
 | GET | `/v1/jobs/{id}` | Job status and progress (`audio_url` when done) |
 | GET | `/v1/jobs/{id}/audio` | Download the finished podcast |
+| GET | `/v1/voices` | List voices (`?provider=`, `?gender=female\|male`) |
 | GET | `/health` | Liveness |
 
 ### Speech
@@ -74,6 +75,19 @@ curl -X POST http://127.0.0.1:8000/v1/speech/stream \
   -H "Content-Type: application/json" \
   -d "{\"text\":\"Hello world. How are you?\"}" --output stream.wav
 ```
+
+### Voices
+
+```bash
+curl "http://127.0.0.1:8000/v1/voices?provider=kokoro&gender=male"
+# -> {"default_provider": "kokoro", "providers": ["kokoro", "openai"],
+#     "voices": [{"id": "am_michael", "name": "am_michael", "provider": "kokoro",
+#                 "language": "en-US", "gender": "male"}, ...]}
+```
+
+Kokoro's genders come from the voice id (`af_`/`bf_` female, `am_`/`bm_` male). OpenAI
+publishes no gender metadata, so its genders are perceived ones, and `alloy` is `null`
+(neutral).
 
 ### Podcast
 

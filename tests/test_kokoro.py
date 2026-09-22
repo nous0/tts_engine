@@ -58,7 +58,15 @@ def test_voices_are_english():
     voices = asyncio.run(provider.list_voices())
     assert len(voices) == len(kk.KOKORO_VOICES)
     assert any(v.id == "af_heart" for v in voices)
-    assert all(v.provider == "kokoro" and v.language == "en" for v in voices)
+    assert all(v.provider == "kokoro" for v in voices)
+    by_id = {v.id: v for v in voices}
+    assert (by_id["af_heart"].gender, by_id["af_heart"].language) == ("female", "en-US")
+    assert (by_id["am_michael"].gender, by_id["am_michael"].language) == ("male", "en-US")
+    assert (by_id["bf_emma"].gender, by_id["bf_emma"].language) == ("female", "en-GB")
+    assert (by_id["bm_george"].gender, by_id["bm_george"].language) == ("male", "en-GB")
+    # Every voice id encodes a gender, so none is left untagged.
+    assert all(v.gender in ("female", "male") for v in voices)
+    assert len(set(kk.KOKORO_VOICES)) == len(kk.KOKORO_VOICES)
 
 
 def test_can_produce_matches_environment():
