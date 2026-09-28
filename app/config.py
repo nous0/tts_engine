@@ -28,6 +28,9 @@ class Settings(BaseSettings):
     jobs_db: str = "./output/jobs.db"
     podcast_pause_ms: int = 600
 
+    # Logging (app + openai loggers): DEBUG, INFO, WARNING, ERROR
+    log_level: str = "INFO"
+
 
 @lru_cache
 def get_settings() -> Settings:

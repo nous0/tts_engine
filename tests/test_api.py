@@ -317,3 +317,24 @@ def test_voices_rejects_unknown_gender():
         _install_two_providers()
         resp = client.get("/v1/voices", params={"gender": "robot"})
     assert resp.status_code == 422
+
+
+def test_every_response_carries_a_request_id():
+    with TestClient(app) as client:
+        resp = client.get("/health")
+    assert resp.headers["X-Request-ID"]
+
+
+def test_client_request_id_is_echoed_back():
+    with TestClient(app) as client:
+        resp = client.get("/health", headers={"X-Request-ID": "abc-123"})
+    assert resp.headers["X-Request-ID"] == "abc-123"
+
+
+def test_requests_are_logged_with_their_id(caplog):
+    with caplog.at_level("INFO", logger="app"), TestClient(app) as client:
+        client.get("/health", headers={"X-Request-ID": "trace-me"})
+    lines = [r for r in caplog.records if r.name == "app.http"]
+    assert any(
+        "GET /health -> 200" in r.getMessage() and r.request_id == "trace-me" for r in lines
+    )

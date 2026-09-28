@@ -2,21 +2,27 @@
 
 from __future__ import annotations
 
+import logging
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 
 from app.api.routes import podcast, speech, voices
 from app.config import get_settings
 from app.core.engine import TTSEngine
 from app.core.jobs import JobStore
 from app.core.providers.registry import build_registry
+from app.logging_setup import configure_logging, new_request_id, request_id_var
+
+log = logging.getLogger("app.http")
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = get_settings()
+    configure_logging(settings.log_level)
     providers = build_registry(settings)
     app.state.engine = TTSEngine(
         providers=providers,
@@ -31,6 +37,9 @@ async def lifespan(app: FastAPI):
     jobs = JobStore(settings.jobs_db)
     await jobs.connect()
     app.state.jobs = jobs
+    logging.getLogger("app").info(
+        "started: providers=%s default=%s", sorted(providers), settings.default_provider
+    )
     try:
         yield
     finally:
@@ -41,6 +50,30 @@ app = FastAPI(title="TTS Engine", version="0.1.0", lifespan=lifespan)
 app.include_router(speech.router)
 app.include_router(podcast.router)
 app.include_router(voices.router)
+
+
+@app.middleware("http")
+async def request_context(request: Request, call_next):
+    """Tag the request with an id, echo it back, and log one line per request."""
+    rid = new_request_id(request.headers.get("x-request-id"))
+    token = request_id_var.set(rid)
+    started = time.perf_counter()
+    status = 500
+    try:
+        response = await call_next(request)
+        status = response.status_code
+        response.headers["X-Request-ID"] = rid
+        return response
+    finally:
+        # For streaming responses this is time-to-headers, not the full stream.
+        log.info(
+            "%s %s -> %s in %.0f ms",
+            request.method,
+            request.url.path,
+            status,
+            (time.perf_counter() - started) * 1000,
+        )
+        request_id_var.reset(token)
 
 
 @app.get("/health", tags=["meta"])
