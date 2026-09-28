@@ -12,6 +12,7 @@ from fastapi.responses import JSONResponse
 
 from app.api.routes import podcast, speech, voices
 from app.config import get_settings
+from app.core.cache import FileCache
 from app.core.engine import InvalidRequest, ProviderNotConfigured, TTSEngine
 from app.core.jobs import JobStore
 from app.core.providers.base import ProviderError, UnsupportedFormat
@@ -26,10 +27,15 @@ async def lifespan(app: FastAPI):
     settings = get_settings()
     configure_logging(settings.log_level)
     providers = build_registry(settings)
+    cache = None
+    if settings.cache_enabled:
+        cache = FileCache(settings.cache_dir, settings.cache_max_mb * 1024 * 1024)
+        await cache.prune()
     app.state.engine = TTSEngine(
         providers=providers,
         default_provider=settings.default_provider,
         default_voice=settings.default_voice,
+        cache=cache,
     )
 
     output_dir = Path(settings.output_dir)

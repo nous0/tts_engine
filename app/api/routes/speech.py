@@ -40,7 +40,7 @@ def _engine(request: Request) -> TTSEngine:
 async def create_speech(req: SpeechRequest, request: Request) -> Response:
     # Provider/format/voice/upstream errors are mapped to statuses in app/main.py.
     opts = SynthOpts(format=req.format, speed=req.speed, instructions=req.instructions)
-    audio = await _engine(request).synthesize(
+    audio, cache_hit = await _engine(request).synthesize_cached(
         req.text, voice=req.voice, provider=req.provider, opts=opts
     )
 
@@ -48,7 +48,10 @@ async def create_speech(req: SpeechRequest, request: Request) -> Response:
     return Response(
         content=audio,
         media_type=media_type,
-        headers={"Content-Disposition": f'inline; filename="speech.{req.format}"'},
+        headers={
+            "Content-Disposition": f'inline; filename="speech.{req.format}"',
+            "X-Cache": "hit" if cache_hit else "miss",
+        },
     )
 
 

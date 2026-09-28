@@ -39,6 +39,11 @@ class Settings(BaseSettings):
     # Finished jobs (and their audio files) older than this are deleted; 0 keeps all.
     jobs_retention_days: float = Field(7, ge=0)
 
+    # On-disk cache of synthesized audio (one-shot speech and podcast turns).
+    cache_enabled: bool = True
+    cache_dir: str = "./output/cache"
+    cache_max_mb: int = Field(512, ge=0)
+
     # Logging (app + openai loggers): DEBUG, INFO, WARNING, ERROR
     log_level: str = "INFO"
 

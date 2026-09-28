@@ -16,6 +16,7 @@ def isolated_output(tmp_path, monkeypatch):
     out_dir = tmp_path / "output"
     monkeypatch.setenv("OUTPUT_DIR", str(out_dir))
     monkeypatch.setenv("JOBS_DB", str(out_dir / "jobs.db"))
+    monkeypatch.setenv("CACHE_DIR", str(out_dir / "cache"))
     get_settings.cache_clear()
     yield out_dir
     get_settings.cache_clear()

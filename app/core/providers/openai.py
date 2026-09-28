@@ -73,6 +73,10 @@ class OpenAIProvider:
         self._default_model = default_model
         self.default_voice = default_voice
 
+    def cache_tag(self, opts: SynthOpts) -> str:
+        """The model that will actually be used, so a model change misses the cache."""
+        return f"openai:{opts.model or self._default_model}"
+
     async def synthesize(self, text: str, voice: str, opts: SynthOpts) -> bytes:
         model = opts.model or self._default_model
         kwargs: dict[str, object] = {}

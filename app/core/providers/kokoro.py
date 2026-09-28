@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+import functools
+import importlib.metadata
 import importlib.util
 import logging
 import threading
@@ -45,6 +47,14 @@ KOKORO_VOICES = [
     "am_michael", "am_fenrir", "am_puck", "bm_george", "bm_fable", "am_echo", "am_eric",
     "am_liam", "am_onyx", "am_adam", "bm_lewis", "bm_daniel", "am_santa",
 ]
+
+
+@functools.cache
+def _kokoro_version() -> str:
+    try:
+        return importlib.metadata.version("kokoro")
+    except importlib.metadata.PackageNotFoundError:
+        return "unknown"
 
 
 def is_installed() -> bool:
@@ -140,6 +150,10 @@ class KokoroProvider:
     @property
     def default_voice(self) -> str:
         return self._default_voice
+
+    def cache_tag(self, opts: SynthOpts) -> str:
+        """Kokoro's package version: upgrading the model/code misses the cache."""
+        return f"kokoro:{_kokoro_version()}"
 
     def can_produce(self, fmt: str) -> bool:
         return fmt in NATIVE_FORMATS or HAS_FFMPEG

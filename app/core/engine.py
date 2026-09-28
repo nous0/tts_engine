@@ -6,12 +6,17 @@ Podcast assembly lives in ``podcast.py`` and uses the engine for each turn.
 
 from __future__ import annotations
 
+import logging
+import time
 from collections.abc import AsyncIterator
 from dataclasses import replace
 
+from .cache import FileCache
 from .chunker import split_sentences
 from .providers._audio import wav_stream_header
 from .providers.base import SynthOpts, TTSProvider, Voice
+
+log = logging.getLogger("app.engine")
 
 # Formats whose per-sentence files can't simply be concatenated into one stream.
 STREAM_UNSUPPORTED_FORMATS = frozenset({"flac"})
@@ -49,10 +54,12 @@ class TTSEngine:
         providers: dict[str, TTSProvider],
         default_provider: str,
         default_voice: str,
+        cache: FileCache | None = None,
     ) -> None:
         self._providers = providers
         self._default_provider = default_provider
         self._default_voice = default_voice
+        self._cache = cache
 
     @property
     def default_provider(self) -> str:
@@ -100,9 +107,55 @@ class TTSEngine:
         provider: str | None = None,
         opts: SynthOpts | None = None,
     ) -> bytes:
+        audio, _hit = await self.synthesize_cached(text, voice, provider, opts)
+        return audio
+
+    async def synthesize_cached(
+        self,
+        text: str,
+        voice: str | None = None,
+        provider: str | None = None,
+        opts: SynthOpts | None = None,
+    ) -> tuple[bytes, bool]:
+        """Like ``synthesize``, also saying whether the audio came from the cache.
+
+        The cache key uses the resolved voice and the provider's ``cache_tag`` (its
+        real model/version), so defaults and model changes can't serve stale audio.
+        Streaming is never cached.
+        """
         p = self.get_provider(provider)
         eff_voice = await self.resolve_voice(p, voice)
-        return await p.synthesize(text, eff_voice, opts or SynthOpts())
+        eff_opts = opts or SynthOpts()
+        key = None
+        if self._cache is not None:
+            key = self._cache.make_key(
+                provider=p.name,
+                tag=_cache_tag(p, eff_opts),
+                voice=eff_voice,
+                format=eff_opts.format,
+                speed=eff_opts.speed,
+                instructions=eff_opts.instructions,
+                text=text,
+            )
+            cached = await self._cache.get(key, eff_opts.format)
+            if cached is not None:
+                log.debug("cache hit: provider=%s voice=%s chars=%d", p.name, eff_voice,
+                          len(text))
+                return cached, True
+
+        started = time.perf_counter()
+        audio = await p.synthesize(text, eff_voice, eff_opts)
+        log.info(
+            "synthesized: provider=%s voice=%s format=%s chars=%d in %.0f ms",
+            p.name,
+            eff_voice,
+            eff_opts.format,
+            len(text),
+            (time.perf_counter() - started) * 1000,
+        )
+        if self._cache is not None and key is not None:
+            await self._cache.put(key, eff_opts.format, audio)
+        return audio, False
 
     async def synthesize_stream(
         self,
@@ -146,3 +199,9 @@ class TTSEngine:
     async def list_voices(self, provider: str | None = None) -> list[Voice]:
         p = self.get_provider(provider)
         return await p.list_voices()
+
+
+def _cache_tag(provider: TTSProvider, opts: SynthOpts) -> str:
+    """What besides the inputs determines the audio: model name, package version."""
+    tag = getattr(provider, "cache_tag", None)
+    return tag(opts) if callable(tag) else provider.name
