@@ -7,7 +7,7 @@ from typing import Literal
 from pydantic import BaseModel, Field, model_validator
 
 AudioFormat = Literal["mp3", "wav", "opus", "aac", "flac", "pcm"]
-JobState = Literal["queued", "running", "done", "error"]
+JobState = Literal["queued", "running", "done", "error", "cancelled"]
 Gender = Literal["female", "male"]
 
 

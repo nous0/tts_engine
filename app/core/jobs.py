@@ -6,6 +6,16 @@ reload of the client (and can be inspected while running); the stdlib
 ``sqlite3`` driver is used from a worker thread, which keeps the dependency
 list unchanged.
 
+Jobs really queue: at most ``max_concurrent`` run at once (default 1, since a local
+Kokoro render already uses every core); the rest stay ``queued`` until a slot frees.
+On startup, jobs left ``queued``/``running`` by a previous process are marked as
+errors, and finished jobs older than the retention period are deleted with their
+files, at startup and then hourly.
+
+Assumes a single server process: tasks live in this process's memory, so with
+several workers one could neither cancel nor see another's jobs, and startup
+recovery would fail jobs that another worker is still running.
+
 Scale-out path: swap this module for Celery/RQ + object storage. Nothing
 outside it knows how jobs are stored.
 """
@@ -13,7 +23,9 @@ outside it knows how jobs are stored.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
+import logging
 import sqlite3
 import time
 import uuid
@@ -39,11 +51,32 @@ CREATE TABLE IF NOT EXISTS jobs (
 """
 
 
+log = logging.getLogger("app.jobs")
+
+CLEANUP_INTERVAL_S = 3600.0
+
+
 class JobStatus(StrEnum):
     QUEUED = "queued"
     RUNNING = "running"
     DONE = "done"
     ERROR = "error"
+    CANCELLED = "cancelled"
+
+
+FINISHED = frozenset({JobStatus.DONE, JobStatus.ERROR, JobStatus.CANCELLED})
+
+
+class JobNotFound(LookupError):
+    """No job with that id."""
+
+
+class JobNotActive(Exception):
+    """The job already finished, so it can't be cancelled."""
+
+    def __init__(self, job: Job) -> None:
+        self.job = job
+        super().__init__(f"Job '{job.id}' is already {job.status.value}.")
 
 
 @dataclass(slots=True)
@@ -78,11 +111,14 @@ class Job:
 class JobStore:
     """SQLite-backed job records plus an in-process asyncio worker."""
 
-    def __init__(self, db_path: str | Path) -> None:
+    def __init__(self, db_path: str | Path, max_concurrent: int = 1) -> None:
         self._db_path = Path(db_path)
         self._conn: sqlite3.Connection | None = None
         self._lock = asyncio.Lock()
-        self._tasks: set[asyncio.Task] = set()
+        self._slots = asyncio.Semaphore(max(1, max_concurrent))
+        self._tasks: dict[str, asyncio.Task] = {}
+        self._user_cancelled: set[str] = set()
+        self._maintenance: asyncio.Task | None = None
 
     async def connect(self) -> None:
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -96,10 +132,16 @@ class JobStore:
         self._conn = conn
 
     async def close(self) -> None:
-        for task in list(self._tasks):
+        if self._maintenance is not None:
+            self._maintenance.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._maintenance
+            self._maintenance = None
+        tasks = list(self._tasks.values())
+        for task in tasks:
             task.cancel()
-        if self._tasks:
-            await asyncio.gather(*self._tasks, return_exceptions=True)
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
         if self._conn is not None:
             self._conn.close()
             self._conn = None
@@ -148,6 +190,7 @@ class JobStore:
             return
         if "status" in fields:
             fields["status"] = JobStatus(fields["status"]).value
+            log.info("job %s -> %s", job_id, fields["status"])
         if "meta" in fields:
             fields["meta"] = json.dumps(fields["meta"])
         fields["updated_at"] = time.time()
@@ -157,33 +200,146 @@ class JobStore:
         )
 
     def spawn(self, job_id: str, work: Callable[[], Awaitable[None]]) -> None:
-        """Run ``work`` in the background, recording failures on the job."""
+        """Queue ``work`` to run in the background, recording the outcome on the job.
+
+        The job stays ``queued`` until one of the ``max_concurrent`` slots frees up.
+        """
 
         async def runner() -> None:
-            await self.update(job_id, status=JobStatus.RUNNING)
             try:
-                await work()
+                async with self._slots:
+                    await self.update(job_id, status=JobStatus.RUNNING)
+                    await work()
             except asyncio.CancelledError:
-                await self.update(
-                    job_id, status=JobStatus.ERROR, error="Job cancelled (server shutdown)."
-                )
+                await self._record_cancellation(job_id)
                 raise
             except Exception as exc:  # noqa: BLE001 - recorded on the job for the client
+                log.exception("job %s failed", job_id)
                 await self.update(job_id, status=JobStatus.ERROR, error=str(exc))
+            finally:
+                self._user_cancelled.discard(job_id)
+                self._tasks.pop(job_id, None)
 
-        task = asyncio.create_task(runner())
-        self._tasks.add(task)
-        task.add_done_callback(self._tasks.discard)
+        self._tasks[job_id] = asyncio.create_task(runner())
+
+    async def cancel(self, job_id: str, wait: float = 5.0) -> Job:
+        """Cancel a queued or running job and return its updated record.
+
+        A queued job stops at once. A running job stops at its next await; work
+        already handed to a thread (the Kokoro sentence being synthesized) finishes
+        in the background and its result is discarded.
+        """
+        job = await self.get(job_id)
+        if job is None:
+            raise JobNotFound(job_id)
+        if job.status in FINISHED:
+            raise JobNotActive(job)
+        task = self._tasks.get(job_id)
+        if task is None:
+            # Active in the database but not running here (e.g. left over): just mark it.
+            await self.update(job_id, status=JobStatus.CANCELLED)
+        else:
+            self._user_cancelled.add(job_id)
+            task.cancel()
+            await asyncio.wait({task}, timeout=wait)
+        updated = await self.get(job_id)
+        assert updated is not None
+        return updated
+
+    async def recover_stale(self) -> int:
+        """Mark jobs a previous process left queued/running as errors; return how many."""
+        conn = self._require_conn()
+        now = time.time()
+
+        def run() -> int:
+            with conn:
+                cur = conn.execute(
+                    "UPDATE jobs SET status = ?, error = ?, updated_at = ?"
+                    " WHERE status IN (?, ?)",
+                    (
+                        JobStatus.ERROR.value,
+                        "Interrupted by a server restart.",
+                        now,
+                        JobStatus.QUEUED.value,
+                        JobStatus.RUNNING.value,
+                    ),
+                )
+                return cur.rowcount
+
+        async with self._lock:
+            count = await asyncio.to_thread(run)
+        if count:
+            log.warning("marked %d interrupted job(s) as error after restart", count)
+        return count
+
+    async def cleanup(self, retention_days: float, output_dir: str | Path) -> int:
+        """Delete finished jobs last updated before the retention window, with files.
+
+        Only files inside ``output_dir`` are ever deleted. A row whose file can't be
+        removed right now (e.g. locked on Windows) is kept and retried next time.
+        """
+        if retention_days <= 0:
+            return 0
+        cutoff = time.time() - retention_days * 86400
+        finished = tuple(status.value for status in FINISHED)
+        rows = await self._query(
+            "SELECT id, result_path FROM jobs WHERE updated_at < ? AND status IN (?, ?, ?)",
+            (cutoff, *finished),
+        )
+        root = Path(output_dir).resolve()
+        removable: list[str] = []
+        for row in rows:
+            if row["result_path"] and not _remove_file(row["result_path"], root):
+                continue
+            removable.append(row["id"])
+        for job_id in removable:
+            await self._execute("DELETE FROM jobs WHERE id = ?", (job_id,))
+        if removable:
+            log.info(
+                "cleaned up %d finished job(s) older than %s day(s)",
+                len(removable),
+                retention_days,
+            )
+        return len(removable)
+
+    def start_maintenance(
+        self,
+        retention_days: float,
+        output_dir: str | Path,
+        interval: float = CLEANUP_INTERVAL_S,
+    ) -> None:
+        """Run ``cleanup`` now and then every ``interval`` seconds until ``close``."""
+
+        async def loop() -> None:
+            while True:
+                try:
+                    await self.cleanup(retention_days, output_dir)
+                except Exception:  # noqa: BLE001 - maintenance must never die
+                    log.exception("job cleanup failed")
+                await asyncio.sleep(interval)
+
+        self._maintenance = asyncio.create_task(loop())
 
     async def wait(self, job_id: str, timeout: float = 60.0) -> Job | None:
-        """Block until a job leaves the queued/running states (used by tests/CLIs)."""
+        """Block until a job finishes (used by tests/CLIs)."""
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             job = await self.get(job_id)
-            if job is None or job.status in (JobStatus.DONE, JobStatus.ERROR):
+            if job is None or job.status in FINISHED:
                 return job
             await asyncio.sleep(0.05)
         return await self.get(job_id)
+
+    async def _record_cancellation(self, job_id: str) -> None:
+        job = await self.get(job_id)
+        if job is None or job.status in FINISHED:
+            return  # finished just before the cancel landed; keep that outcome
+        if job_id in self._user_cancelled:
+            await self.update(job_id, status=JobStatus.CANCELLED)
+        else:
+            await self.update(
+                job_id, status=JobStatus.ERROR, error="Job cancelled (server shutdown)."
+            )
 
     async def _execute(self, sql: str, params: tuple) -> None:
         conn = self._require_conn()
@@ -208,3 +364,20 @@ class JobStore:
         if self._conn is None:
             raise RuntimeError("JobStore is not connected; call connect() first.")
         return self._conn
+
+
+def _remove_file(path: str, root: Path) -> bool:
+    """Delete ``path`` if it lies inside ``root``; True when the row can go too."""
+    try:
+        resolved = Path(path).resolve()
+    except OSError:
+        return True
+    if not resolved.is_relative_to(root):
+        log.warning("not deleting %s: outside the output directory", resolved)
+        return True  # drop the row, leave the foreign file alone
+    try:
+        resolved.unlink(missing_ok=True)
+    except OSError as exc:
+        log.warning("could not delete %s yet: %s", resolved, exc)
+        return False
+    return True

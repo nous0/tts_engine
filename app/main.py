@@ -36,8 +36,10 @@ async def lifespan(app: FastAPI):
     output_dir.mkdir(parents=True, exist_ok=True)
     app.state.output_dir = output_dir
 
-    jobs = JobStore(settings.jobs_db)
+    jobs = JobStore(settings.jobs_db, max_concurrent=settings.max_concurrent_jobs)
     await jobs.connect()
+    await jobs.recover_stale()
+    jobs.start_maintenance(settings.jobs_retention_days, output_dir)
     app.state.jobs = jobs
     logging.getLogger("app").info(
         "started: providers=%s default=%s", sorted(providers), settings.default_provider

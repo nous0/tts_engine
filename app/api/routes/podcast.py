@@ -16,7 +16,7 @@ from fastapi.responses import FileResponse
 from app.core import podcast as podcast_core
 from app.core.audio import AudioError
 from app.core.engine import InvalidRequest, ProviderNotConfigured, TTSEngine
-from app.core.jobs import Job, JobStatus, JobStore
+from app.core.jobs import Job, JobNotActive, JobNotFound, JobStatus, JobStore
 from app.core.podcast import PodcastSpec, ScriptError, Turn
 from app.core.providers.base import ProviderError, SynthOpts, UnsupportedFormat
 from app.models.schemas import (
@@ -180,6 +180,19 @@ async def get_job(job_id: str, request: Request) -> JobResponse:
     job = await _jobs(request).get(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail=f"Job '{job_id}' not found.")
+    return _job_response(job)
+
+
+@router.post("/jobs/{job_id}/cancel")
+async def cancel_job(job_id: str, request: Request) -> JobResponse:
+    """Cancel a queued or running job. A running render stops after the sentence
+    it is currently synthesizing."""
+    try:
+        job = await _jobs(request).cancel(job_id)
+    except JobNotFound as exc:
+        raise HTTPException(status_code=404, detail=f"Job '{job_id}' not found.") from exc
+    except JobNotActive as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     return _job_response(job)
 
 

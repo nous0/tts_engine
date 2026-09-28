@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import threading
 import time
 
 import pytest
@@ -115,7 +117,7 @@ def _await_job(client: TestClient, job_id: str, timeout: float = 10.0) -> dict:
     payload: dict = {}
     while time.monotonic() < deadline:
         payload = client.get(f"/v1/jobs/{job_id}").json()
-        if payload["status"] in ("done", "error"):
+        if payload["status"] in ("done", "error", "cancelled"):
             return payload
         time.sleep(0.05)
     return payload
@@ -547,3 +549,43 @@ def test_invalid_default_voice_falls_back_to_the_provider_default():
         resp = client.post("/v1/speech", json={"text": "Hi"})
     assert resp.status_code == 200
     assert main.seen == ["am_michael"]
+
+
+class BlockingProvider(FakeProvider):
+    """Blocks every synthesis until the test releases it."""
+
+    def __init__(self) -> None:
+        self.started = threading.Event()
+        self.release = asyncio.Event()
+
+    async def synthesize(self, text: str, voice: str, opts: SynthOpts) -> bytes:
+        self.started.set()
+        await self.release.wait()
+        return b""
+
+
+def test_cancel_running_podcast_job():
+    provider = BlockingProvider()
+    with TestClient(app) as client:
+        app.state.engine = TTSEngine(
+            {"fake": provider}, default_provider="fake", default_voice="fake-1"
+        )
+        job_id = client.post(
+            "/v1/podcast", json={"script": "Alice: Hi.", "format": "pcm"}
+        ).json()["job_id"]
+        assert provider.started.wait(timeout=5)
+
+        resp = client.post(f"/v1/jobs/{job_id}/cancel")
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "cancelled"
+
+        again = client.post(f"/v1/jobs/{job_id}/cancel")
+        assert again.status_code == 409
+        audio = client.get(f"/v1/jobs/{job_id}/audio")
+        assert audio.status_code == 409
+
+
+def test_cancel_unknown_job_returns_404():
+    with TestClient(app) as client:
+        resp = client.post("/v1/jobs/does-not-exist/cancel")
+    assert resp.status_code == 404
