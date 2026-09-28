@@ -15,7 +15,7 @@ Last checked: 2026-09-28.
   - job queue, cancel and recovery;
   - disk cache.
 
-  **207 tests pass**, `ruff check .` is clean.
+  **208 tests pass**, `ruff check .` is clean.
 - **Verified end-to-end against a live server with Kokoro (2026-09-28):**
   - A 3-sentence WAV stream has exactly 1 `RIFF` header. Before, there was one per
     sentence, heard as a click.
@@ -40,8 +40,11 @@ Last checked: 2026-09-28.
   Preloading is a known to-do.
 - **`kokoro-tts/`** (vendored upstream checkout, its own git repo) is gitignored; the app
   only uses the `kokoro` PyPI package.
-- Windows quirk: twice, a green pytest run ended with a faulthandler thread dump (exit 0,
-  all passed). It didn't reproduce in 15+ reruns. Ignore it unless tests fail.
+- **Fixed a crash found while testing:** occasional "access violation" (segfault, exit
+  139) in the test suite. Cause: `JobStore.close()` closed SQLite while a cancelled task's
+  query was still running in its thread (the startup cleanup added in Phase 5). The lock
+  is now held until the thread finishes. There is a regression test, and 15/15 full runs
+  were clean afterwards.
 
 ## What's done
 

@@ -266,3 +266,48 @@ async def test_cleanup_tolerates_missing_files_and_can_be_disabled(store, tmp_pa
     assert await store.cleanup(0, out) == 0
     assert await store.get(job.id) is not None
     assert await store.cleanup(7, out) == 1
+
+
+class SlowConnection:
+    """Wraps a sqlite3 connection: slow queries, and records a close during one."""
+
+    def __init__(self, conn):
+        self._conn = conn
+        self.in_flight = 0
+        self.closed_during_query = False
+
+    def execute(self, *args):
+        self.in_flight += 1
+        try:
+            time.sleep(0.3)
+            return self._conn.execute(*args)
+        finally:
+            self.in_flight -= 1
+
+    def close(self):
+        if self.in_flight:
+            self.closed_during_query = True
+        self._conn.close()
+
+    def __enter__(self):
+        return self._conn.__enter__()
+
+    def __exit__(self, *exc):
+        return self._conn.__exit__(*exc)
+
+
+async def test_close_waits_for_an_in_flight_query_of_a_cancelled_task(tmp_path):
+    # Regression: cancelling a task mid-query released the lock while the query was
+    # still running in its thread, and close() then closed the connection under it,
+    # crashing the process with an access violation.
+    s = JobStore(tmp_path / "jobs.db")
+    await s.connect()
+    slow = SlowConnection(s._conn)
+    s._conn = slow
+
+    task = asyncio.create_task(s.list())
+    await asyncio.sleep(0.05)  # the query is now running in a worker thread
+    task.cancel()
+    await s.close()
+
+    assert slow.closed_during_query is False

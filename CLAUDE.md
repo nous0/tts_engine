@@ -107,6 +107,9 @@ Request flow: **route → `TTSEngine` → provider → (podcast only) audio pipe
   - `recover_stale` (at startup) fails jobs left `queued`/`running` by a previous process.
   - `start_maintenance` deletes old finished jobs and their files hourly.
   - **Single-process assumption:** don't run uvicorn with `--workers N`.
+  - Every SQLite call goes through `_in_thread`, which keeps the lock until the thread
+    finishes even if the caller is cancelled, and `close()` takes the same lock. Closing the
+    connection under a running query crashes the process.
 
 ## Testing notes
 
@@ -118,9 +121,10 @@ Request flow: **route → `TTSEngine` → provider → (podcast only) audio pipe
   `tests/test_openai.py` runs the real OpenAI SDK against `httpx.MockTransport` (error
   responses carry `retry-after-ms: 1` to keep retries fast). Kokoro tests inject fake
   pipelines into `provider._pipelines`, or a fake `kokoro` module via `sys.modules`.
-- On Windows, pytest's faulthandler has occasionally printed a thread dump at the end of an
-  otherwise green run (exit code 0). It hasn't reproduced; treat it as noise unless tests
-  fail.
+- A "Windows fatal exception: access violation" thread dump in a test run is a real bug,
+  not noise. The one seen so far was the job store closing SQLite under a query still
+  running in a thread (fixed in `JobStore._in_thread`). Run the suite several times after
+  touching threading code.
 
 ## Repo gotchas
 

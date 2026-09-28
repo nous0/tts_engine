@@ -142,9 +142,10 @@ class JobStore:
             task.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
-        if self._conn is not None:
-            self._conn.close()
-            self._conn = None
+        async with self._lock:  # never close under an in-flight query
+            if self._conn is not None:
+                self._conn.close()
+                self._conn = None
 
     async def create(self, kind: str, total: int = 0, meta: dict | None = None) -> Job:
         now = time.time()
@@ -266,8 +267,7 @@ class JobStore:
                 )
                 return cur.rowcount
 
-        async with self._lock:
-            count = await asyncio.to_thread(run)
+        count = await self._in_thread(run)
         if count:
             log.warning("marked %d interrupted job(s) as error after restart", count)
         return count
@@ -348,8 +348,7 @@ class JobStore:
             with conn:
                 conn.execute(sql, params)
 
-        async with self._lock:
-            await asyncio.to_thread(run)
+        await self._in_thread(run)
 
     async def _query(self, sql: str, params: tuple) -> list[sqlite3.Row]:
         conn = self._require_conn()
@@ -357,8 +356,23 @@ class JobStore:
         def run() -> list[sqlite3.Row]:
             return conn.execute(sql, params).fetchall()
 
+        return await self._in_thread(run)
+
+    async def _in_thread(self, fn: Callable[[], Any]) -> Any:
+        """Run one SQLite call on a worker thread, holding the lock until it ends.
+
+        Cancelling the awaiting task does not stop the thread. Without waiting here,
+        the lock would be released while the call is still running, and ``close()``
+        could close the connection under it, which crashes the process (an access
+        violation inside SQLite).
+        """
         async with self._lock:
-            return await asyncio.to_thread(run)
+            call = asyncio.ensure_future(asyncio.to_thread(fn))
+            try:
+                return await asyncio.shield(call)
+            except asyncio.CancelledError:
+                await asyncio.wait({call})
+                raise
 
     def _require_conn(self) -> sqlite3.Connection:
         if self._conn is None:
