@@ -6,7 +6,14 @@ package and its model are never needed.
 
 from __future__ import annotations
 
+import asyncio
+import sys
+import threading
+import time
+import types
+
 import numpy as np
+import pytest
 
 from app.core.providers import kokoro as kk
 from app.core.providers.base import SynthOpts
@@ -106,3 +113,90 @@ async def test_stream_wav_emits_header_then_segments():
     # First chunk is the streaming WAV header; then one PCM chunk per segment.
     assert chunks[0][:4] == b"RIFF"
     assert len(chunks) == 3
+
+
+class SlowPipeline:
+    """Records how many calls run at once; each call sleeps between segments."""
+
+    def __init__(self, segments: int = 2, delay: float = 0.05):
+        self.segments = segments
+        self.delay = delay
+        self.active = 0
+        self.max_active = 0
+        self.produced = 0
+        self._lock = threading.Lock()
+
+    def __call__(self, text, voice, speed):
+        with self._lock:
+            self.active += 1
+            self.max_active = max(self.max_active, self.active)
+        try:
+            for _ in range(self.segments):
+                time.sleep(self.delay)
+                with self._lock:
+                    self.produced += 1
+                yield ("g", "p", np.array([0.1], dtype="float32"))
+        finally:
+            with self._lock:
+                self.active -= 1
+
+
+async def test_synthesis_is_limited_to_max_concurrency():
+    provider = KokoroProvider(max_concurrency=1)
+    pipe = SlowPipeline()
+    provider._pipelines["a"] = pipe
+    opts = SynthOpts(format="pcm")
+    await asyncio.gather(*(provider.synthesize("hi", "af_heart", opts) for _ in range(3)))
+    assert pipe.max_active == 1
+
+
+async def test_pipeline_is_loaded_once_under_concurrent_first_use(monkeypatch):
+    constructed: list[str] = []
+
+    class FakeKPipeline:
+        def __init__(self, lang_code):
+            time.sleep(0.1)  # a slow model load widens the race window
+            constructed.append(lang_code)
+
+    fake_module = types.ModuleType("kokoro")
+    fake_module.KPipeline = FakeKPipeline
+    monkeypatch.setitem(sys.modules, "kokoro", fake_module)
+
+    provider = KokoroProvider(max_concurrency=4)
+    threads = [threading.Thread(target=provider._pipeline, args=("a",)) for _ in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert constructed == ["a"]
+
+
+async def test_stream_producer_stops_when_the_consumer_goes_away():
+    provider = KokoroProvider()
+    pipe = SlowPipeline(segments=1000, delay=0.01)
+    provider._pipelines["a"] = pipe
+
+    stream = provider.synthesize_stream("hi", "af_heart", SynthOpts(format="pcm"))
+    await anext(stream)
+    await stream.aclose()
+
+    await asyncio.sleep(0.1)  # let the producer notice the stop flag
+    stopped_at = pipe.produced
+    await asyncio.sleep(0.2)
+    assert pipe.produced <= stopped_at + 1
+    assert pipe.produced < 100
+    assert pipe.active == 0
+
+
+async def test_stream_propagates_producer_errors():
+    class Boom:
+        def __call__(self, text, voice, speed):
+            yield ("g", "p", np.array([0.1], dtype="float32"))
+            raise RuntimeError("model exploded")
+
+    provider = KokoroProvider()
+    provider._pipelines["a"] = Boom()
+    stream = provider.synthesize_stream("hi", "af_heart", SynthOpts(format="pcm"))
+    assert await anext(stream)
+    with pytest.raises(RuntimeError, match="model exploded"):
+        await anext(stream)

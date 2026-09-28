@@ -7,9 +7,14 @@ Podcast assembly lives in ``podcast.py`` and uses the engine for each turn.
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from dataclasses import replace
 
 from .chunker import split_sentences
+from .providers._audio import wav_stream_header
 from .providers.base import SynthOpts, TTSProvider, Voice
+
+# Formats whose per-sentence files can't simply be concatenated into one stream.
+STREAM_UNSUPPORTED_FORMATS = frozenset({"flac"})
 
 
 class ProviderNotConfigured(Exception):
@@ -20,6 +25,10 @@ class ProviderNotConfigured(Exception):
         self.available = available
         hint = ", ".join(available) if available else "none configured"
         super().__init__(f"Provider '{name}' is not configured (available: {hint}).")
+
+
+class InvalidRequest(ValueError):
+    """The request itself can't be served (maps to HTTP 400)."""
 
 
 class TTSEngine:
@@ -72,12 +81,29 @@ class TTSEngine:
         through the provider's ``synthesize_stream`` so audio bytes are yielded
         as soon as they are produced. This lets a chatbot start playing the
         first sentence while later sentences are still being synthesized.
+
+        For ``wav`` the provider is asked for raw PCM and the engine sends a single
+        streaming WAV header, just before the first audio chunk. Asking providers for
+        WAV per sentence would put a header between sentences, which players render
+        as a click. Nothing is yielded until the provider produces real audio, so a
+        caller can wait for the first chunk to catch early failures.
         """
         p = self.get_provider(provider)
         eff_voice = voice or self._default_voice
         eff_opts = opts or SynthOpts()
+        if eff_opts.format in STREAM_UNSUPPORTED_FORMATS:
+            raise InvalidRequest(
+                f"Format '{eff_opts.format}' can't be streamed; use /v1/speech for it, "
+                f"or stream wav, pcm, mp3, opus or aac."
+            )
+        wav = eff_opts.format == "wav"
+        provider_opts = replace(eff_opts, format="pcm") if wav else eff_opts
+        header_sent = False
         for sentence in split_sentences(text, max_length=max_sentence_length):
-            async for chunk in p.synthesize_stream(sentence, eff_voice, eff_opts):
+            async for chunk in p.synthesize_stream(sentence, eff_voice, provider_opts):
+                if wav and not header_sent:
+                    header_sent = True
+                    yield wav_stream_header()
                 yield chunk
 
     async def list_voices(self, provider: str | None = None) -> list[Voice]:

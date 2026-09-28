@@ -7,7 +7,7 @@ import time
 from fastapi.testclient import TestClient
 
 from app.core.engine import TTSEngine
-from app.core.providers.base import SynthOpts, Voice
+from app.core.providers.base import SynthOpts, UnsupportedFormat, Voice
 from app.main import app
 from tests.test_audio import tone
 
@@ -86,7 +86,9 @@ def test_speech_stream_returns_chunked_audio():
     # Two sentences -> two synthesized chunks, each emitting a marker + tail.
     body = resp.content
     assert body.count(b"_AUDIO") == 2
-    assert body.startswith(b"[")
+    # One streaming WAV header up front, never one per sentence.
+    assert body.startswith(b"RIFF")
+    assert body.count(b"RIFF") == 1
     # The marker carries the byte length of each sentence chunk.
     assert b"[13]" in body or b"[12]" in body
 
@@ -338,3 +340,84 @@ def test_requests_are_logged_with_their_id(caplog):
     assert any(
         "GET /health -> 200" in r.getMessage() and r.request_id == "trace-me" for r in lines
     )
+
+
+class WavPerCallProvider(FakeProvider):
+    """Emits a WAV header per call when asked for wav, like real providers do."""
+
+    name = "wavfake"
+
+    def __init__(self) -> None:
+        self.formats: list[str] = []
+
+    async def synthesize_stream(self, text: str, voice: str, opts: SynthOpts):
+        self.formats.append(opts.format)
+        if opts.format == "wav":
+            yield b"RIFF-per-call"
+        yield b"pcm"
+
+
+def test_speech_stream_wav_has_a_single_header_across_sentences():
+    provider = WavPerCallProvider()
+    with TestClient(app) as client:
+        app.state.engine = TTSEngine(
+            {"wavfake": provider}, default_provider="wavfake", default_voice="fake-1"
+        )
+        resp = client.post(
+            "/v1/speech/stream", json={"text": "One. Two. Three.", "format": "wav"}
+        )
+    assert resp.status_code == 200
+    assert resp.content.count(b"RIFF") == 1
+    assert b"RIFF-per-call" not in resp.content
+    assert provider.formats == ["pcm", "pcm", "pcm"]
+
+
+def test_speech_stream_rejects_flac():
+    with TestClient(app) as client:
+        _install_fake_engine()
+        resp = client.post("/v1/speech/stream", json={"text": "Hi.", "format": "flac"})
+    assert resp.status_code == 400
+    assert "can't be streamed" in resp.json()["detail"]
+
+
+class FailingStreamProvider(FakeProvider):
+    """Fails on the sentence number ``fail_at`` (1-based)."""
+
+    name = "failing"
+
+    def __init__(self, fail_at: int) -> None:
+        self.fail_at = fail_at
+        self.calls = 0
+
+    async def synthesize_stream(self, text: str, voice: str, opts: SynthOpts):
+        self.calls += 1
+        if self.calls == self.fail_at:
+            raise UnsupportedFormat(opts.format, self.name)
+        yield b"pcm"
+
+
+def test_speech_stream_error_before_first_audio_is_a_real_error_status():
+    with TestClient(app) as client:
+        app.state.engine = TTSEngine(
+            {"failing": FailingStreamProvider(fail_at=1)},
+            default_provider="failing",
+            default_voice="fake-1",
+        )
+        resp = client.post("/v1/speech/stream", json={"text": "One. Two."})
+    assert resp.status_code == 400
+
+
+def test_speech_stream_error_mid_stream_never_writes_text_into_audio():
+    with TestClient(app, raise_server_exceptions=False) as client:
+        app.state.engine = TTSEngine(
+            {"failing": FailingStreamProvider(fail_at=2)},
+            default_provider="failing",
+            default_voice="fake-1",
+        )
+        try:
+            resp = client.post("/v1/speech/stream", json={"text": "One. Two."})
+            body = resp.content
+        except Exception:  # noqa: BLE001 - a dropped connection is also acceptable
+            body = b""
+    assert b"not supported" not in body
+    assert b"Format" not in body

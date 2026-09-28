@@ -20,7 +20,10 @@ def build_registry(settings: Settings) -> dict[str, TTSProvider]:
     # Local Kokoro (CPU) — registered only when the package is installed so the
     # provider list reflects what can actually run.
     if settings.kokoro_enabled and kokoro_installed():
-        providers["kokoro"] = KokoroProvider(default_voice=settings.kokoro_voice)
+        providers["kokoro"] = KokoroProvider(
+            default_voice=settings.kokoro_voice,
+            max_concurrency=settings.kokoro_max_concurrency,
+        )
 
     if settings.openai_api_key:
         providers["openai"] = OpenAIProvider(

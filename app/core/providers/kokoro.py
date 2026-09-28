@@ -6,7 +6,9 @@ with smooth prosody that suits narration.
 
 Kokoro produces 24 kHz float32 audio per sentence-ish segment, so it maps cleanly onto
 the shared PCM/WAV helpers and streams segment-by-segment. Inference is synchronous and
-CPU-bound, so it is run in a worker thread to avoid blocking the event loop.
+CPU-bound, so it runs on a dedicated thread pool sized by ``max_concurrency`` (default
+1): extra requests wait their turn instead of all fighting over the CPU, and they
+never occupy threads of the default executor that the job store's SQLite calls use.
 
 Install:  pip install -e ".[local]"
 Docs:     https://github.com/hexgrad/kokoro
@@ -15,10 +17,12 @@ Docs:     https://github.com/hexgrad/kokoro
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import importlib.util
-import queue
+import logging
 import threading
 from collections.abc import AsyncIterator, Callable, Iterator
+from concurrent.futures import Executor, ThreadPoolExecutor
 
 from ._audio import (
     HAS_FFMPEG,
@@ -28,6 +32,8 @@ from ._audio import (
     wav_stream_header,
 )
 from .base import Gender, SynthOpts, UnsupportedFormat, Voice
+
+log = logging.getLogger("app.providers.kokoro")
 
 # American (a) and British (b) English voices shipped with Kokoro; the second letter
 # is the voice's gender (f/m). Within each gender, voices are ordered roughly by the
@@ -70,29 +76,51 @@ def _floats_to_pcm16(audio: object) -> bytes:
     return (arr * 32767.0).astype("<i2").tobytes()
 
 
-async def _aiter_blocking(gen_factory: Callable[[], Iterator[bytes]]) -> AsyncIterator[bytes]:
-    """Bridge a blocking generator to an async iterator via a worker thread."""
-    q: queue.Queue = queue.Queue(maxsize=8)
+async def _aiter_blocking(
+    gen_factory: Callable[[], Iterator[bytes]], executor: Executor
+) -> AsyncIterator[bytes]:
+    """Bridge a blocking generator to an async iterator.
+
+    The producer runs on ``executor`` and hands items to the event loop with
+    ``call_soon_threadsafe``, so waiting for the next item costs no thread. When the
+    consumer stops early (client disconnected, task cancelled), a stop flag makes the
+    producer quit at its next item instead of blocking forever.
+    """
+    loop = asyncio.get_running_loop()
+    items: asyncio.Queue = asyncio.Queue()
+    stop = threading.Event()
     done = object()
+
+    def push(item: object) -> None:
+        try:
+            loop.call_soon_threadsafe(items.put_nowait, item)
+        except RuntimeError:  # event loop already closed; nobody is listening
+            stop.set()
 
     def run() -> None:
         try:
             for item in gen_factory():
-                q.put(item)
+                if stop.is_set():
+                    log.debug("producer stopped: consumer went away")
+                    return
+                push(item)
         except Exception as exc:  # noqa: BLE001 - propagate to the consumer
-            q.put(exc)
+            push(exc)
         finally:
-            q.put(done)
+            push(done)
 
-    threading.Thread(target=run, daemon=True).start()
-    loop = asyncio.get_running_loop()
-    while True:
-        item = await loop.run_in_executor(None, q.get)
-        if item is done:
-            return
-        if isinstance(item, Exception):
-            raise item
-        yield item
+    ctx = contextvars.copy_context()  # keep the request id on the worker's log lines
+    loop.run_in_executor(executor, ctx.run, run)
+    try:
+        while True:
+            item = await items.get()
+            if item is done:
+                return
+            if isinstance(item, Exception):
+                raise item
+            yield item
+    finally:
+        stop.set()
 
 
 class KokoroProvider:
@@ -101,24 +129,35 @@ class KokoroProvider:
     name = "kokoro"
     native_formats = NATIVE_FORMATS
 
-    def __init__(self, default_voice: str = "af_heart") -> None:
+    def __init__(self, default_voice: str = "af_heart", max_concurrency: int = 1) -> None:
         self._default_voice = default_voice
         self._pipelines: dict[str, object] = {}  # lang_code -> KPipeline (lazy)
+        self._pipeline_lock = threading.Lock()
+        self._executor = ThreadPoolExecutor(
+            max_workers=max(1, max_concurrency), thread_name_prefix="kokoro"
+        )
 
     def can_produce(self, fmt: str) -> bool:
         return fmt in NATIVE_FORMATS or HAS_FFMPEG
 
     def _pipeline(self, lang_code: str) -> object:
         pipe = self._pipelines.get(lang_code)
-        if pipe is None:
-            try:
-                from kokoro import KPipeline
-            except ImportError as exc:  # pragma: no cover - env-dependent
-                raise RuntimeError(
-                    'Kokoro is not installed. Run: pip install -e ".[local]"'
-                ) from exc
-            pipe = KPipeline(lang_code=lang_code)
-            self._pipelines[lang_code] = pipe
+        if pipe is not None:
+            return pipe
+        # Loading takes tens of seconds; the lock stops two first requests from each
+        # loading their own copy of the model.
+        with self._pipeline_lock:
+            pipe = self._pipelines.get(lang_code)
+            if pipe is None:
+                try:
+                    from kokoro import KPipeline
+                except ImportError as exc:  # pragma: no cover - env-dependent
+                    raise RuntimeError(
+                        'Kokoro is not installed. Run: pip install -e ".[local]"'
+                    ) from exc
+                log.info("loading Kokoro pipeline (lang=%s)", lang_code)
+                pipe = KPipeline(lang_code=lang_code)
+                self._pipelines[lang_code] = pipe
         return pipe
 
     def _segments(self, text: str, voice: str, speed: float) -> Iterator[bytes]:
@@ -137,7 +176,11 @@ class KokoroProvider:
 
     async def synthesize(self, text: str, voice: str, opts: SynthOpts) -> bytes:
         v = voice or self._default_voice
-        pcm = await asyncio.to_thread(self._collect_pcm, text, v, opts.speed)
+        loop = asyncio.get_running_loop()
+        ctx = contextvars.copy_context()
+        pcm = await loop.run_in_executor(
+            self._executor, ctx.run, self._collect_pcm, text, v, opts.speed
+        )
         return await self._encode(pcm, opts.format)
 
     async def synthesize_stream(
@@ -153,7 +196,9 @@ class KokoroProvider:
 
         if fmt == "wav":
             yield wav_stream_header()
-        async for pcm in _aiter_blocking(lambda: self._segments(text, v, opts.speed)):
+        async for pcm in _aiter_blocking(
+            lambda: self._segments(text, v, opts.speed), self._executor
+        ):
             yield pcm
 
     async def list_voices(self) -> list[Voice]:
