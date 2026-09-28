@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import time
 
+import pytest
 from fastapi.testclient import TestClient
 
 from app.core.engine import TTSEngine
-from app.core.providers.base import SynthOpts, UnsupportedFormat, Voice
+from app.core.providers.base import ProviderError, SynthOpts, UnsupportedFormat, Voice
 from app.main import app
 from tests.test_audio import tone
 
@@ -421,3 +422,128 @@ def test_speech_stream_error_mid_stream_never_writes_text_into_audio():
             body = b""
     assert b"not supported" not in body
     assert b"Format" not in body
+
+
+class ErroringProvider(FakeProvider):
+    """Raises a ProviderError of the given kind from every call."""
+
+    name = "erroring"
+
+    def __init__(self, kind: str, retry_after: float | None = None) -> None:
+        self.kind = kind
+        self.retry_after = retry_after
+
+    def _error(self) -> ProviderError:
+        return ProviderError(self.name, "nope", kind=self.kind, retry_after=self.retry_after)
+
+    async def synthesize(self, text: str, voice: str, opts: SynthOpts) -> bytes:
+        raise self._error()
+
+    async def synthesize_stream(self, text: str, voice: str, opts: SynthOpts):
+        raise self._error()
+        yield b""  # pragma: no cover - makes this an async generator
+
+
+def _install_erroring(kind: str, retry_after: float | None = None) -> None:
+    app.state.engine = TTSEngine(
+        {"erroring": ErroringProvider(kind, retry_after)},
+        default_provider="erroring",
+        default_voice="fake-1",
+    )
+
+
+@pytest.mark.parametrize(
+    ("kind", "status"),
+    [("bad_request", 400), ("auth", 502), ("upstream", 502), ("rate_limited", 503),
+     ("timeout", 504)],
+)
+@pytest.mark.parametrize("path", ["/v1/speech", "/v1/speech/stream"])
+def test_provider_errors_map_to_http_statuses(kind, status, path):
+    with TestClient(app) as client:
+        _install_erroring(kind)
+        resp = client.post(path, json={"text": "Hello."})
+    assert resp.status_code == status
+    assert resp.json()["kind"] == kind
+    assert "erroring" in resp.json()["detail"]
+
+
+def test_rate_limited_response_carries_retry_after():
+    with TestClient(app) as client:
+        _install_erroring("rate_limited", retry_after=7)
+        resp = client.post("/v1/speech", json={"text": "Hello."})
+    assert resp.status_code == 503
+    assert resp.headers["Retry-After"] == "7"
+
+
+def test_podcast_job_records_provider_errors():
+    with TestClient(app) as client:
+        _install_erroring("timeout")
+        resp = client.post("/v1/podcast", json={"script": "Alice: Hi.", "format": "pcm"})
+        assert resp.status_code == 202
+        job = _await_job(client, resp.json()["job_id"])
+    assert job["status"] == "error"
+    assert "timed out" in job["error"]
+
+
+@pytest.mark.parametrize("path", ["/v1/speech", "/v1/speech/stream"])
+def test_unknown_voice_is_rejected_with_400(path):
+    with TestClient(app) as client:
+        _install_fake_engine()
+        resp = client.post(path, json={"text": "Hello.", "voice": "C:/evil/voice.pt"})
+    assert resp.status_code == 400
+    assert "Unknown voice" in resp.json()["detail"]
+
+
+def test_podcast_with_unknown_voice_is_rejected_at_submit():
+    with TestClient(app) as client:
+        _install_fake_engine()
+        resp = client.post(
+            "/v1/podcast",
+            json={"script": "Alice: Hi.\nBob: Hey.", "voices": {"Alice": "not-a-voice"}},
+        )
+    assert resp.status_code == 400
+    assert "Unknown voice 'not-a-voice'" in resp.json()["detail"]
+
+
+class RecordingProvider(FakeProvider):
+    """Remembers the voice it was asked for; has its own default voice."""
+
+    def __init__(self, name: str, voices: list[str], default_voice: str | None = None):
+        self.name = name
+        self._voices = voices
+        if default_voice:
+            self.default_voice = default_voice
+        self.seen: list[str] = []
+
+    async def synthesize(self, text: str, voice: str, opts: SynthOpts) -> bytes:
+        self.seen.append(voice)
+        return b"FAKE_AUDIO"
+
+    async def list_voices(self) -> list[Voice]:
+        return [Voice(id=v, name=v, provider=self.name) for v in self._voices]
+
+
+def test_non_default_provider_uses_its_own_default_voice():
+    # DEFAULT_VOICE belongs to the default provider; asking another provider
+    # without a voice must not send it that voice.
+    other = RecordingProvider("other", ["alloy", "nova"], default_voice="nova")
+    with TestClient(app) as client:
+        app.state.engine = TTSEngine(
+            {"main": RecordingProvider("main", ["af_heart"]), "other": other},
+            default_provider="main",
+            default_voice="af_heart",
+        )
+        resp = client.post("/v1/speech", json={"text": "Hi", "provider": "other"})
+    assert resp.status_code == 200
+    assert other.seen == ["nova"]
+
+
+def test_invalid_default_voice_falls_back_to_the_provider_default():
+    main = RecordingProvider("main", ["af_heart", "am_michael"], default_voice="am_michael")
+    with TestClient(app) as client:
+        app.state.engine = TTSEngine(
+            {"main": main}, default_provider="main", default_voice="Kore"
+        )
+        resp = client.post("/v1/speech", json={"text": "Hi"})
+    assert resp.status_code == 200
+    assert main.seen == ["am_michael"]

@@ -8,11 +8,13 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 
 from app.api.routes import podcast, speech, voices
 from app.config import get_settings
-from app.core.engine import TTSEngine
+from app.core.engine import InvalidRequest, ProviderNotConfigured, TTSEngine
 from app.core.jobs import JobStore
+from app.core.providers.base import ProviderError, UnsupportedFormat
 from app.core.providers.registry import build_registry
 from app.logging_setup import configure_logging, new_request_id, request_id_var
 
@@ -50,6 +52,35 @@ app = FastAPI(title="TTS Engine", version="0.1.0", lifespan=lifespan)
 app.include_router(speech.router)
 app.include_router(podcast.router)
 app.include_router(voices.router)
+
+
+# How each ProviderError kind reaches the client.
+_PROVIDER_ERROR_STATUS = {
+    "bad_request": 400,
+    "auth": 502,
+    "upstream": 502,
+    "rate_limited": 503,
+    "timeout": 504,
+}
+
+
+@app.exception_handler(ProviderError)
+async def provider_error_handler(request: Request, exc: ProviderError) -> JSONResponse:
+    headers = {}
+    if exc.retry_after is not None:
+        headers["Retry-After"] = str(max(1, round(exc.retry_after)))
+    return JSONResponse(
+        status_code=_PROVIDER_ERROR_STATUS.get(exc.kind, 502),
+        content={"detail": str(exc), "kind": exc.kind},
+        headers=headers,
+    )
+
+
+@app.exception_handler(ProviderNotConfigured)
+@app.exception_handler(UnsupportedFormat)
+@app.exception_handler(InvalidRequest)
+async def bad_request_handler(request: Request, exc: Exception) -> JSONResponse:
+    return JSONResponse(status_code=400, content={"detail": str(exc)})
 
 
 @app.middleware("http")

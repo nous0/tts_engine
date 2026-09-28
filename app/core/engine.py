@@ -31,6 +31,18 @@ class InvalidRequest(ValueError):
     """The request itself can't be served (maps to HTTP 400)."""
 
 
+class InvalidVoice(InvalidRequest):
+    """The voice doesn't exist for the chosen provider."""
+
+    def __init__(self, voice: str, provider: str) -> None:
+        self.voice = voice
+        self.provider = provider
+        super().__init__(
+            f"Unknown voice '{voice}' for provider '{provider}'. "
+            f"See GET /v1/voices?provider={provider}."
+        )
+
+
 class TTSEngine:
     def __init__(
         self,
@@ -57,6 +69,30 @@ class TTSEngine:
             raise ProviderNotConfigured(name, sorted(self._providers))
         return provider
 
+    async def resolve_voice(self, provider: TTSProvider, voice: str | None) -> str:
+        """The voice to use: the requested one (validated), else a sensible default.
+
+        An explicit voice must exist in the provider's catalog; this also keeps
+        arbitrary strings (paths, unknown names) away from backends that would try
+        to load or download them. Without one, the first valid choice of: the global
+        DEFAULT_VOICE (only for the default provider), the provider's own default
+        voice, the first voice in its catalog.
+        """
+        catalog = [v.id for v in await provider.list_voices()]
+        if voice:
+            if catalog and voice not in catalog:
+                raise InvalidVoice(voice, provider.name)
+            return voice
+        candidates = [
+            self._default_voice if provider.name == self._default_provider else None,
+            getattr(provider, "default_voice", None),
+            *catalog[:1],
+        ]
+        for candidate in candidates:
+            if candidate and (not catalog or candidate in catalog):
+                return candidate
+        raise InvalidRequest(f"Provider '{provider.name}' has no voice to use; pass 'voice'.")
+
     async def synthesize(
         self,
         text: str,
@@ -65,7 +101,8 @@ class TTSEngine:
         opts: SynthOpts | None = None,
     ) -> bytes:
         p = self.get_provider(provider)
-        return await p.synthesize(text, voice or self._default_voice, opts or SynthOpts())
+        eff_voice = await self.resolve_voice(p, voice)
+        return await p.synthesize(text, eff_voice, opts or SynthOpts())
 
     async def synthesize_stream(
         self,
@@ -89,7 +126,7 @@ class TTSEngine:
         caller can wait for the first chunk to catch early failures.
         """
         p = self.get_provider(provider)
-        eff_voice = voice or self._default_voice
+        eff_voice = await self.resolve_voice(p, voice)
         eff_opts = opts or SynthOpts()
         if eff_opts.format in STREAM_UNSUPPORTED_FORMATS:
             raise InvalidRequest(

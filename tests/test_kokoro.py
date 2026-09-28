@@ -16,7 +16,7 @@ import numpy as np
 import pytest
 
 from app.core.providers import kokoro as kk
-from app.core.providers.base import SynthOpts
+from app.core.providers.base import ProviderError, SynthOpts
 from app.core.providers.kokoro import KokoroProvider
 
 
@@ -200,3 +200,19 @@ async def test_stream_propagates_producer_errors():
     assert await anext(stream)
     with pytest.raises(RuntimeError, match="model exploded"):
         await anext(stream)
+
+
+async def test_model_load_failure_is_a_provider_error(monkeypatch):
+    class BrokenKPipeline:
+        def __init__(self, lang_code):
+            raise OSError("huggingface.co unreachable")
+
+    fake_module = types.ModuleType("kokoro")
+    fake_module.KPipeline = BrokenKPipeline
+    monkeypatch.setitem(sys.modules, "kokoro", fake_module)
+
+    provider = KokoroProvider()
+    with pytest.raises(ProviderError) as info:
+        await provider.synthesize("hi", "af_heart", SynthOpts(format="pcm"))
+    assert info.value.kind == "upstream"
+    assert "could not load the model" in str(info.value)

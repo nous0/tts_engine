@@ -31,7 +31,7 @@ from ._audio import (
     pcm_to_wav,
     wav_stream_header,
 )
-from .base import Gender, SynthOpts, UnsupportedFormat, Voice
+from .base import Gender, ProviderError, SynthOpts, UnsupportedFormat, Voice
 
 log = logging.getLogger("app.providers.kokoro")
 
@@ -137,6 +137,10 @@ class KokoroProvider:
             max_workers=max(1, max_concurrency), thread_name_prefix="kokoro"
         )
 
+    @property
+    def default_voice(self) -> str:
+        return self._default_voice
+
     def can_produce(self, fmt: str) -> bool:
         return fmt in NATIVE_FORMATS or HAS_FFMPEG
 
@@ -156,7 +160,13 @@ class KokoroProvider:
                         'Kokoro is not installed. Run: pip install -e ".[local]"'
                     ) from exc
                 log.info("loading Kokoro pipeline (lang=%s)", lang_code)
-                pipe = KPipeline(lang_code=lang_code)
+                try:
+                    pipe = KPipeline(lang_code=lang_code)
+                except Exception as exc:  # download/load failure: report, don't crash
+                    log.exception("Kokoro model failed to load")
+                    raise ProviderError(
+                        self.name, f"could not load the model ({exc})", kind="upstream"
+                    ) from exc
                 self._pipelines[lang_code] = pipe
         return pipe
 

@@ -21,6 +21,10 @@ class Settings(BaseSettings):
     kokoro_max_concurrency: int = Field(1, ge=1, le=8)
     openai_api_key: str | None = None
     openai_tts_model: str = "gpt-4o-mini-tts"
+    openai_voice: str = "alloy"
+    # Per-attempt timeout in seconds, and retries on network/429/5xx errors (by the SDK).
+    openai_timeout: float = Field(30.0, gt=0)
+    openai_max_retries: int = Field(2, ge=0, le=10)
 
     # Engine defaults (local Kokoro needs no key)
     default_provider: str = "kokoro"

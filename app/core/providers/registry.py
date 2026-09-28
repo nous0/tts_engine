@@ -29,6 +29,9 @@ def build_registry(settings: Settings) -> dict[str, TTSProvider]:
         providers["openai"] = OpenAIProvider(
             api_key=settings.openai_api_key,
             default_model=settings.openai_tts_model,
+            default_voice=settings.openai_voice,
+            timeout=settings.openai_timeout,
+            max_retries=settings.openai_max_retries,
         )
 
     return providers

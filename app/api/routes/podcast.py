@@ -15,10 +15,10 @@ from fastapi.responses import FileResponse
 
 from app.core import podcast as podcast_core
 from app.core.audio import AudioError
-from app.core.engine import ProviderNotConfigured, TTSEngine
+from app.core.engine import InvalidRequest, ProviderNotConfigured, TTSEngine
 from app.core.jobs import Job, JobStatus, JobStore
 from app.core.podcast import PodcastSpec, ScriptError, Turn
-from app.core.providers.base import SynthOpts, UnsupportedFormat
+from app.core.providers.base import ProviderError, SynthOpts, UnsupportedFormat
 from app.models.schemas import (
     JobResponse,
     PodcastJobResponse,
@@ -60,9 +60,17 @@ async def _resolve_voices(
 ) -> dict[str, str]:
     """Fill in a voice for every speaker, pulling the provider's catalog if needed."""
     if all(t.voice or req.voices.get(t.speaker) for t in turns):
-        return dict(req.voices)
-    catalog = await engine.list_voices(req.provider)
-    return podcast_core.assign_voices(turns, req.voices, catalog, req.genders)
+        voices = dict(req.voices)
+    else:
+        catalog = await engine.list_voices(req.provider)
+        voices = podcast_core.assign_voices(turns, req.voices, catalog, req.genders)
+    # Check every voice that will actually be used against its turn's provider now,
+    # so a typo is a 400 at submit time rather than an errored job minutes later.
+    for turn in turns:
+        voice = turn.voice or voices.get(turn.speaker)
+        provider = engine.get_provider(turn.provider or req.provider)
+        await engine.resolve_voice(provider, voice)
+    return voices
 
 
 def _job_response(job: Job) -> JobResponse:
@@ -92,7 +100,7 @@ async def create_podcast(req: PodcastRequest, request: Request) -> PodcastJobRes
         voices = await _resolve_voices(engine, turns, req)
     except ScriptError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except ProviderNotConfigured as exc:
+    except (ProviderNotConfigured, InvalidRequest) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     can_produce = getattr(provider, "can_produce", None)
@@ -144,7 +152,14 @@ def _renderer(
 
         try:
             data = await podcast_core.render(spec, synthesize, on_progress)
-        except (AudioError, UnsupportedFormat, ScriptError, ProviderNotConfigured) as exc:
+        except (
+            AudioError,
+            UnsupportedFormat,
+            ScriptError,
+            ProviderNotConfigured,
+            ProviderError,
+            InvalidRequest,
+        ) as exc:
             await jobs.update(job_id, status=JobStatus.ERROR, error=str(exc))
             return
 

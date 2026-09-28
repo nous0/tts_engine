@@ -13,6 +13,7 @@ from typing import Literal, Protocol, runtime_checkable
 # Audio container formats the engine understands.
 AudioFormat = str  # "mp3" | "wav" | "opus" | "aac" | "flac" | "pcm"
 Gender = Literal["female", "male"]
+ProviderErrorKind = Literal["timeout", "rate_limited", "auth", "bad_request", "upstream"]
 
 
 class UnsupportedFormat(Exception):
@@ -29,6 +30,35 @@ class UnsupportedFormat(Exception):
             f"Format '{fmt}' is not supported by provider '{provider}' without "
             f"ffmpeg. Use 'wav' or 'pcm', or install ffmpeg."
         )
+
+
+class ProviderError(Exception):
+    """A provider call failed: timeout, rate limit, bad credentials, bad input, or
+    an upstream/network error. The API maps ``kind`` to an HTTP status (see
+    ``app/main.py``), so a flaky backend never surfaces as an opaque 500.
+    """
+
+    def __init__(
+        self,
+        provider: str,
+        message: str,
+        *,
+        kind: ProviderErrorKind = "upstream",
+        retry_after: float | None = None,
+    ) -> None:
+        self.provider = provider
+        self.kind = kind
+        self.retry_after = retry_after
+        super().__init__(f"Provider '{provider}' {_KIND_TEXT[kind]}: {message}")
+
+
+_KIND_TEXT: dict[str, str] = {
+    "timeout": "timed out",
+    "rate_limited": "is rate limiting requests",
+    "auth": "rejected the server's credentials",
+    "bad_request": "rejected the request",
+    "upstream": "failed",
+}
 
 
 @dataclass(slots=True)

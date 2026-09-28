@@ -9,10 +9,10 @@ from __future__ import annotations
 import logging
 from collections.abc import AsyncIterator
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Request
 from fastapi.responses import Response, StreamingResponse
 
-from app.core.engine import InvalidRequest, ProviderNotConfigured, TTSEngine
+from app.core.engine import TTSEngine
 from app.core.providers.base import SynthOpts, UnsupportedFormat
 from app.models.schemas import SpeechRequest, SpeechStreamRequest
 
@@ -38,13 +38,11 @@ def _engine(request: Request) -> TTSEngine:
     responses={200: {"content": {"audio/mpeg": {}}, "description": "Synthesized audio."}},
 )
 async def create_speech(req: SpeechRequest, request: Request) -> Response:
+    # Provider/format/voice/upstream errors are mapped to statuses in app/main.py.
     opts = SynthOpts(format=req.format, speed=req.speed, instructions=req.instructions)
-    try:
-        audio = await _engine(request).synthesize(
-            req.text, voice=req.voice, provider=req.provider, opts=opts
-        )
-    except (ProviderNotConfigured, UnsupportedFormat) as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    audio = await _engine(request).synthesize(
+        req.text, voice=req.voice, provider=req.provider, opts=opts
+    )
 
     media_type = _MEDIA_TYPES.get(req.format, "application/octet-stream")
     return Response(
@@ -89,16 +87,10 @@ async def create_speech_stream(
     engine = _engine(request)
     # Validate up-front so an unconfigured provider or unsupported format
     # returns a clean 400 before we commit to a chunked 200 response.
-    try:
-        provider = engine.get_provider(req.provider)
-    except ProviderNotConfigured as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
+    provider = engine.get_provider(req.provider)
     can_produce = getattr(provider, "can_produce", None)
     if can_produce is not None and not can_produce(req.format):
-        raise HTTPException(
-            status_code=400, detail=str(UnsupportedFormat(req.format, provider.name))
-        )
+        raise UnsupportedFormat(req.format, provider.name)
 
     opts = SynthOpts(format=req.format, speed=req.speed, instructions=req.instructions)
     chunks = engine.synthesize_stream(
@@ -109,15 +101,12 @@ async def create_speech_stream(
         max_sentence_length=req.max_sentence_length,
     )
     # Wait for the first audio chunk before sending headers, so the most common
-    # failures (bad format, provider down, first sentence failing) still get a real
-    # error status instead of a 200 followed by a broken stream.
+    # failures (bad voice or format, provider down or timing out) still get a real
+    # error status (mapped in app/main.py) instead of a 200 and a broken stream.
     try:
         first = await anext(chunks)
     except StopAsyncIteration:
         first = b""
-    except (ProviderNotConfigured, UnsupportedFormat, InvalidRequest) as exc:
-        await chunks.aclose()
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except BaseException:
         await chunks.aclose()
         raise
