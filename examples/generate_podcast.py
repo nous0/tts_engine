@@ -19,6 +19,7 @@ from pathlib import Path
 
 from app.config import get_settings
 from app.core import podcast as podcast_core
+from app.core.cache import FileCache
 from app.core.engine import TTSEngine
 from app.core.podcast import PodcastSpec
 from app.core.providers.base import SynthOpts
@@ -79,10 +80,17 @@ async def main() -> None:
             "or set OPENAI_API_KEY in .env."
         )
 
+    # Same on-disk cache as the server: re-rendering a script skips turns already done.
+    cache = (
+        FileCache(settings.cache_dir, settings.cache_max_mb * 1024 * 1024)
+        if settings.cache_enabled
+        else None
+    )
     engine = TTSEngine(
         providers=providers,
         default_provider=settings.default_provider,
         default_voice=settings.default_voice,
+        cache=cache,
     )
 
     turns = podcast_core.parse_script(args.script.read_text(encoding="utf-8"))

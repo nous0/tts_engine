@@ -4,9 +4,10 @@ A Python/FastAPI backend that wraps TTS providers behind one API. It targets two
 consumers: **chatbot** (low-latency streaming speech) and **podcast** (long-form,
 multi-speaker audio files rendered as background jobs).
 
-**Status:** Phases 1–4 done (Kokoro + OpenAI providers, `GET /v1/voices`, gender-aware
-podcast casting). Phase 5 polish not started. See `CONTEXT.md` for the
-current to-do list.
+**Status:** Phases 1–5 done: Kokoro + OpenAI providers, `GET /v1/voices`, gender-aware
+podcast casting, and the Phase 5 hardening for local use (timeouts and clear errors, a
+real job queue with cancel and restart recovery, an on-disk audio cache, and
+request-scoped logging). See `CONTEXT.md` for what's next.
 
 ## Providers
 
@@ -39,6 +40,9 @@ uv run streamlit run streamlit_app.py      # optional browser test UI
 - Swagger UI: http://127.0.0.1:8000/docs
 - Health: http://127.0.0.1:8000/health
 
+Run **one** server process (no `--workers N`): background jobs live in the process's
+memory, so several workers can't see or cancel each other's jobs.
+
 ## API
 
 | Method | Path | Purpose |
@@ -49,6 +53,7 @@ uv run streamlit run streamlit_app.py      # optional browser test UI
 | GET | `/v1/jobs` | List recent jobs |
 | GET | `/v1/jobs/{id}` | Job status and progress (`audio_url` when done) |
 | GET | `/v1/jobs/{id}/audio` | Download the finished podcast |
+| POST | `/v1/jobs/{id}/cancel` | Cancel a queued or running job (409 if already finished) |
 | GET | `/v1/voices` | List voices (`?provider=`, `?gender=female\|male`) |
 | GET | `/health` | Liveness |
 
@@ -114,6 +119,49 @@ curl -X POST http://127.0.0.1:8000/v1/podcast \
 curl http://127.0.0.1:8000/v1/jobs/<job_id>
 curl http://127.0.0.1:8000/v1/jobs/<job_id>/audio --output podcast.wav
 ```
+
+### Errors
+
+Every error is JSON with a `detail` message. Provider failures also have a `kind`:
+
+| Status | When |
+|---|---|
+| 400 | Bad input: unknown provider or voice (`GET /v1/voices` lists valid ones), unsupported format, `flac` on the stream endpoint, or the provider rejected the text (`kind: bad_request`) |
+| 502 | The provider failed (`upstream`) or rejected the server's API key (`auth`) |
+| 503 | The provider is rate limiting (`rate_limited`); `Retry-After` says when to retry |
+| 504 | The provider timed out (`timeout`) |
+
+OpenAI calls time out after `OPENAI_TIMEOUT` seconds (default 30) per attempt. The SDK
+retries network errors, 429 and 5xx up to `OPENAI_MAX_RETRIES` times (default 2) with
+backoff, so the worst case is about 95 s. Bad input and bad keys are not retried.
+
+On the stream endpoint the server waits for the first audio chunk before answering, so
+most failures still come back as a proper error status. If a later sentence fails, the
+connection is dropped (the client sees an incomplete response); error text is never
+mixed into the audio.
+
+## Reliability notes
+
+- **Kokoro runs one synthesis at a time** (`KOKORO_MAX_CONCURRENCY`, default 1), since
+  each one already uses every CPU core. Extra requests wait their turn.
+- **Podcast jobs queue:** `MAX_CONCURRENT_JOBS` (default 1) render at once, and the rest
+  stay `queued`. Cancelling a queued job is immediate. A running job stops after the
+  sentence it is synthesizing.
+- **Restarts:** jobs a crashed or killed server left `queued`/`running` are marked
+  `error` ("Interrupted by a server restart") on the next start.
+- **Cleanup:** finished jobs and their audio are deleted after `JOBS_RETENTION_DAYS`
+  (default 7; 0 keeps everything), at startup and hourly. Only job files inside
+  `OUTPUT_DIR` are removed.
+- **Cache:** one-shot speech and podcast turns are cached on disk in `CACHE_DIR` (default
+  `./output/cache`, up to `CACHE_MAX_MB`, default 512, least recently used evicted), so
+  repeats are nearly instant and survive restarts. `POST /v1/speech` reports
+  `X-Cache: hit|miss`. Streaming is not cached. Set `CACHE_ENABLED=false` to turn it off.
+- **Logging:** one line per request plus provider, retry, cache and job events. Each line
+  carries the request id, which is also returned as `X-Request-ID` (send your own to trace
+  a call). Text is never logged, only its length. `LOG_LEVEL=DEBUG` adds cache hits and
+  stream shutdowns.
+
+All settings are listed in `.env.example`.
 
 ## Examples
 

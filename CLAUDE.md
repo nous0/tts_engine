@@ -64,12 +64,33 @@ Request flow: **route → `TTSEngine` → provider → (podcast only) audio pipe
   provider must produce this format when `opts.format == "pcm"`.
 - **Streaming**: `TTSEngine.synthesize_stream` splits the full request text with
   `split_sentences` and streams each sentence through the provider's `synthesize_stream`.
-  For WAV, providers yield a streaming header first (`wav_stream_header()`).
+  For `wav` the engine asks providers for **PCM** and emits a single `wav_stream_header()`
+  itself, just before the first audio chunk. Never let providers emit a header per
+  sentence. `flac` can't be streamed (400). The route awaits the first chunk before
+  returning the 200, so early failures still get a real status. After that, errors are
+  logged and the connection is dropped; never write error text into the audio stream.
   `SentenceChunker` (for incremental text such as LLM tokens) is used on the client side,
   in `examples/chatbot_stream.py`, not by the server.
-- **Kokoro is synchronous**, so its calls are pushed off the event loop (`asyncio.to_thread`
-  for one-shot calls, and a thread plus queue bridge for streaming). Keep that pattern for
-  any blocking backend.
+- **Kokoro is synchronous and CPU-bound.** It runs on its own `ThreadPoolExecutor`
+  (`KOKORO_MAX_CONCURRENCY`, default 1), not the default executor that the job store's
+  SQLite calls use. `KPipeline` creation is behind a lock. `_aiter_blocking` bridges the
+  blocking generator to async with `call_soon_threadsafe` and a stop flag, so client
+  disconnects don't leak threads. Keep this pattern for any blocking backend.
+- **Errors**: providers raise `ProviderError(kind=timeout|rate_limited|auth|bad_request|upstream)`.
+  Exception handlers in `app/main.py` map it to 504/503/502/400, and map
+  `ProviderNotConfigured`, `UnsupportedFormat` and `InvalidRequest` (incl. `InvalidVoice`)
+  to 400. Routes don't need their own try/except for these. OpenAI retries come from the
+  SDK (`OPENAI_MAX_RETRIES`); the timeout is set explicitly because the SDK default is 600 s.
+- **Voices**: `TTSEngine.resolve_voice` validates an explicit voice against the provider's
+  catalog. This matters for security: Kokoro would otherwise download unknown names from
+  HF or `torch.load` any path ending in `.pt`. It also picks a per-provider default:
+  `DEFAULT_VOICE` only for the default provider, otherwise `provider.default_voice`.
+- **Cache** (`app/core/cache.py`): `TTSEngine.synthesize` goes through `synthesize_cached`.
+  The key includes the resolved voice and the provider's `cache_tag(opts)` (real model or
+  package version). Bump `CACHE_VERSION` if the audio pipeline's output changes. Writes
+  are atomic, and every `OSError` is a miss or a skipped write. Streaming is not cached.
+- **Logging** (`app/logging_setup.py`): the `app.*` and `openai` loggers, with a request id
+  from a contextvar set by the middleware in `app/main.py`. Log text lengths, never text.
 - **Podcast** (`app/core/podcast.py`): `parse_script` accepts a `turns` list, a JSON string,
   or a plain `Speaker: text` transcript. `assign_voices` casts unmapped speakers by gender:
   explicit `genders`, then `app/core/names.py:guess_gender` (a lookup table, which returns
@@ -79,17 +100,27 @@ Request flow: **route → `TTSEngine` → provider → (podcast only) audio pipe
   concatenates them with `pause_ms` of silence, peak-normalizes, and encodes once. You can
   override provider, voice, and instructions per turn.
 - **Jobs** (`app/core/jobs.py`): a SQLite job store that uses the stdlib `sqlite3` from
-  worker threads (not aiosqlite). `JobStore.spawn` runs the render as an in-process asyncio
-  task, and results are written to `output_dir`. Jobs don't survive a process restart
-  mid-render.
+  worker threads (not aiosqlite). `JobStore.spawn` queues the render as an in-process
+  asyncio task behind a semaphore (`MAX_CONCURRENT_JOBS`), and results are written to
+  `output_dir`.
+  - `cancel` records `cancelled` for a user cancel and `error` for a shutdown.
+  - `recover_stale` (at startup) fails jobs left `queued`/`running` by a previous process.
+  - `start_maintenance` deletes old finished jobs and their files hourly.
+  - **Single-process assumption:** don't run uvicorn with `--workers N`.
 
 ## Testing notes
 
-- `tests/conftest.py` has an autouse fixture that points `OUTPUT_DIR`/`JOBS_DB` at a tmp
-  dir and clears the `get_settings()` lru_cache. If a test changes settings through env
+- `tests/conftest.py` has an autouse fixture that points `OUTPUT_DIR`/`JOBS_DB`/`CACHE_DIR`
+  at a tmp dir and clears the `get_settings()` lru_cache. If a test changes settings through env
   vars, call `get_settings.cache_clear()` so the change takes effect.
 - `asyncio_mode = "auto"`, so async tests need no decorator.
 - Provider network calls are mocked. Tests shouldn't need real keys or the Kokoro model.
+  `tests/test_openai.py` runs the real OpenAI SDK against `httpx.MockTransport` (error
+  responses carry `retry-after-ms: 1` to keep retries fast). Kokoro tests inject fake
+  pipelines into `provider._pipelines`, or a fake `kokoro` module via `sys.modules`.
+- On Windows, pytest's faulthandler has occasionally printed a thread dump at the end of an
+  otherwise green run (exit code 0). It hasn't reproduced; treat it as noise unless tests
+  fail.
 
 ## Repo gotchas
 
