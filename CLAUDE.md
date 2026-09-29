@@ -94,7 +94,17 @@ Request flow: **route → `TTSEngine` → provider → (podcast only) audio pipe
 - **Cache** (`app/core/cache.py`): `TTSEngine.synthesize` goes through `synthesize_cached`.
   The key includes the resolved voice and the provider's `cache_tag(opts)` (real model or
   package version). Bump `CACHE_VERSION` if the audio pipeline's output changes. Writes
-  are atomic, and every `OSError` is a miss or a skipped write. Streaming is not cached.
+  are atomic, and every `OSError` is a miss or a skipped write. Streaming caches **per
+  sentence** through `TTSEngine.open_sentence` (pcm/wav only). A miss passes the
+  provider stream through and stores it only if the sentence completes, so an abandoned
+  sentence is never cached. The key matches `synthesize_cached` with `format="pcm"`, so
+  stream sentences and podcast turns share entries. `use_cache=False` (HTTP
+  `Cache-Control: no-cache`) skips the lookup but still stores. Wrap provider streams in
+  `contextlib.aclosing` so closing early reaches the provider (Kokoro's stop flag).
+- **Chunking**: `SentenceChunker(fast_start=True)` lets the first chunk of a turn end at
+  `,;:` once it's `clause_min_chars` (24) long. It never splits numbers like `1,000`,
+  and waits when a comma is the last character received. `flush()`/`reset()` start a new
+  turn.
 - **Logging** (`app/logging_setup.py`): the `app.*` and `openai` loggers, with a request id
   from a contextvar set by the middleware in `app/main.py`. Log text lengths, never text.
 - **Podcast** (`app/core/podcast.py`): `parse_script` accepts a `turns` list, a JSON string,

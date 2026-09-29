@@ -187,3 +187,134 @@ def test_speech_endpoint_reports_cache_hits(tmp_path):
     assert (first.headers["X-Cache"], second.headers["X-Cache"]) == ("miss", "hit")
     assert first.content == second.content
     assert provider.calls == 1
+
+
+class StreamingProvider(CountingProvider):
+    """Streams each sentence as two chunks and counts stream calls."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.stream_calls = 0
+
+    async def synthesize(self, text: str, voice: str, opts: SynthOpts) -> bytes:
+        self.calls += 1
+        return f"<{text}>".encode()
+
+    async def synthesize_stream(self, text: str, voice: str, opts: SynthOpts):
+        self.stream_calls += 1
+        yield b"<"
+        yield f"{text}>".encode()
+
+
+def _streaming_engine(tmp_path):
+    provider = StreamingProvider()
+    engine = TTSEngine(
+        {"counting": provider},
+        default_provider="counting",
+        default_voice="v1",
+        cache=FileCache(tmp_path / "cache", 10_000_000),
+    )
+    return engine, provider
+
+
+async def _collect(stream) -> bytes:
+    return b"".join([chunk async for chunk in stream])
+
+
+async def test_streamed_sentences_are_cached(tmp_path):
+    engine, provider = _streaming_engine(tmp_path)
+    opts = SynthOpts(format="pcm")
+    first = await _collect(engine.synthesize_stream("One. Two.", opts=opts))
+    second = await _collect(engine.synthesize_stream("One. Two.", opts=opts))
+    assert first == second == b"<One.><Two.>"
+    assert provider.stream_calls == 2  # one per sentence, only the first time
+
+
+async def test_partly_cached_text_only_synthesizes_new_sentences(tmp_path):
+    engine, provider = _streaming_engine(tmp_path)
+    opts = SynthOpts(format="pcm")
+    await _collect(engine.synthesize_stream("One.", opts=opts))
+    await _collect(engine.synthesize_stream("One. Two.", opts=opts))
+    assert provider.stream_calls == 2  # "One." came from the cache
+
+
+async def test_an_abandoned_sentence_is_not_cached(tmp_path):
+    engine, provider = _streaming_engine(tmp_path)
+    p = engine.get_provider()
+    audio = await engine.open_sentence(p, "v1", SynthOpts(format="pcm"), "Hello.")
+    assert audio.cached is False
+    await anext(audio.chunks)  # client hangs up after the first chunk
+    await audio.chunks.aclose()
+
+    again = await engine.open_sentence(p, "v1", SynthOpts(format="pcm"), "Hello.")
+    assert again.cached is False
+
+
+async def test_stream_and_one_shot_pcm_share_cache_entries(tmp_path):
+    engine, provider = _streaming_engine(tmp_path)
+    await engine.synthesize_cached("Hello.", opts=SynthOpts(format="pcm"))  # e.g. a podcast turn
+    audio = await engine.open_sentence(
+        engine.get_provider(), "v1", SynthOpts(format="pcm"), "Hello."
+    )
+    assert audio.cached is True
+    assert await _collect(audio.chunks) == b"<Hello.>"
+    assert provider.stream_calls == 0
+
+
+async def test_wav_stream_from_cache_still_has_one_header(tmp_path):
+    engine, _ = _streaming_engine(tmp_path)
+    for _ in range(2):  # second pass is all cache hits
+        body = await _collect(
+            engine.synthesize_stream("One. Two. Three.", opts=SynthOpts(format="wav"))
+        )
+        assert body.count(b"RIFF") == 1
+        assert body.endswith(b"<Three.>")
+
+
+async def test_use_cache_false_skips_the_lookup_but_refreshes_the_entry(tmp_path):
+    engine, provider = _streaming_engine(tmp_path)
+    opts = SynthOpts(format="pcm")
+    await _collect(engine.synthesize_stream("One.", opts=opts))
+    await _collect(engine.synthesize_stream("One.", opts=opts, use_cache=False))
+    assert provider.stream_calls == 2
+    await _collect(engine.synthesize_stream("One.", opts=opts))
+    assert provider.stream_calls == 2  # the refreshed entry is used again
+
+
+def test_no_cache_header_bypasses_the_cache_for_speech(tmp_path):
+    with TestClient(app) as client:
+        app.state.engine, provider = _engine(tmp_path)
+        client.post("/v1/speech", json={"text": "Hello"})
+        fresh = client.post("/v1/speech", json={"text": "Hello"},
+                            headers={"Cache-Control": "no-cache"})
+    assert fresh.headers["X-Cache"] == "miss"
+    assert provider.calls == 2
+
+
+def test_no_cache_header_bypasses_the_cache_for_streams(tmp_path):
+    with TestClient(app) as client:
+        app.state.engine, provider = _streaming_engine(tmp_path)
+        body = {"text": "One. Two.", "format": "pcm"}
+        client.post("/v1/speech/stream", json=body)
+        client.post("/v1/speech/stream", json=body)
+        assert provider.stream_calls == 2
+        client.post("/v1/speech/stream", json=body, headers={"Cache-Control": "no-cache"})
+    assert provider.stream_calls == 4
+
+
+def test_stream_endpoint_fast_start_splits_the_first_sentence(tmp_path):
+    text = "Here is a first clause that is long enough, and then the rest. Done."
+    with TestClient(app) as client:
+        app.state.engine, provider = _streaming_engine(tmp_path)
+        normal = client.post("/v1/speech/stream", json={"text": text, "format": "pcm"})
+        fast = client.post(
+            "/v1/speech/stream",
+            json={"text": text, "format": "pcm", "fast_start": True},
+            headers={"Cache-Control": "no-cache"},
+        )
+    assert normal.content == (
+        b"<Here is a first clause that is long enough, and then the rest.><Done.>"
+    )
+    assert fast.content == (
+        b"<Here is a first clause that is long enough,><and then the rest.><Done.>"
+    )

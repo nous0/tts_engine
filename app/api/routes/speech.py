@@ -33,6 +33,11 @@ def _engine(request: Request) -> TTSEngine:
     return request.app.state.engine
 
 
+def _use_cache(request: Request) -> bool:
+    """``Cache-Control: no-cache`` skips cached audio (fresh audio is still stored)."""
+    return "no-cache" not in request.headers.get("cache-control", "").lower()
+
+
 @router.post(
     "/speech",
     responses={200: {"content": {"audio/mpeg": {}}, "description": "Synthesized audio."}},
@@ -41,7 +46,11 @@ async def create_speech(req: SpeechRequest, request: Request) -> Response:
     # Provider/format/voice/upstream errors are mapped to statuses in app/main.py.
     opts = SynthOpts(format=req.format, speed=req.speed, instructions=req.instructions)
     audio, cache_hit = await _engine(request).synthesize_cached(
-        req.text, voice=req.voice, provider=req.provider, opts=opts
+        req.text,
+        voice=req.voice,
+        provider=req.provider,
+        opts=opts,
+        use_cache=_use_cache(request),
     )
 
     media_type = _MEDIA_TYPES.get(req.format, "application/octet-stream")
@@ -102,6 +111,8 @@ async def create_speech_stream(
         provider=req.provider,
         opts=opts,
         max_sentence_length=req.max_sentence_length,
+        fast_start=req.fast_start,
+        use_cache=_use_cache(request),
     )
     # Wait for the first audio chunk before sending headers, so the most common
     # failures (bad voice or format, provider down or timing out) still get a real

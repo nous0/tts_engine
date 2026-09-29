@@ -85,6 +85,12 @@ curl -X POST http://127.0.0.1:8000/v1/speech/stream \
   -d "{\"text\":\"Hello world. How are you?\"}" --output stream.wav
 ```
 
+`fast_start: true` lets the first chunk end at a comma once it's at least 24 characters
+long, so a long first sentence starts playing sooner. It's off by default because the
+first sentence may sound slightly split. Measured on Kokoro/CPU, time to first audio
+went from 3.5 to 2.0 s for a 79-character first sentence, and from 5.2 to 3.0 s for a
+171-character one.
+
 ### Voices
 
 ```bash
@@ -156,10 +162,14 @@ mixed into the audio.
 - **Cleanup:** finished jobs and their audio are deleted after `JOBS_RETENTION_DAYS`
   (default 7; 0 keeps everything), at startup and hourly. Only job files inside
   `OUTPUT_DIR` are removed.
-- **Cache:** one-shot speech and podcast turns are cached on disk in `CACHE_DIR` (default
-  `./output/cache`, up to `CACHE_MAX_MB`, default 512, least recently used evicted), so
-  repeats are nearly instant and survive restarts. `POST /v1/speech` reports
-  `X-Cache: hit|miss`. Streaming is not cached. Set `CACHE_ENABLED=false` to turn it off.
+- **Cache:** one-shot speech, podcast turns, and **each sentence of a pcm/wav stream** are
+  cached on disk in `CACHE_DIR` (default `./output/cache`, up to `CACHE_MAX_MB`, default
+  512, least recently used evicted). Repeats are nearly instant and survive restarts: a
+  fully cached stream starts in about 10 ms. Streamed sentences and podcast turns share
+  entries. `POST /v1/speech` reports `X-Cache: hit|miss`. Send `Cache-Control: no-cache`
+  to skip cached audio for one request (the fresh result is still stored). Set
+  `CACHE_ENABLED=false` to turn the cache off. Compressed stream formats (mp3/opus/aac)
+  aren't cached.
 - **Logging:** one line per request plus provider, retry, cache and job events. Each line
   carries the request id, which is also returned as `X-Request-ID` (send your own to trace
   a call). Text is never logged, only its length. `LOG_LEVEL=DEBUG` adds cache hits and

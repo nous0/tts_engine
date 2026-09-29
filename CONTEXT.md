@@ -103,6 +103,13 @@ Last checked: 2026-09-29.
   to make. Splitting chunks smaller lowers TTFA but can add stalls like this, unless the
   next chunk is at most about 1.5× the previous one's length (since RTF ≈ 0.65), or the
   client buffers a little before playing.
+- **After Phase 6 commit 2** (same bench, median of 3):
+  - `fast_start` on: TTFA medium 3.50 → **1.98 s**, long first sentence 5.23 → **2.97 s**,
+    short and paragraph unchanged (no comma to split), and no new stalls.
+  - Cache hits (`--use-cache`): TTFA about **0.01 s** for every text. Streams are cached
+    per sentence now.
+  - The paragraph's 0.6 s stall ("Hello!" is too short to cover the next sentence)
+    remains; it needs a small client-side buffer or a WebSocket-side strategy (commit 3+).
 - **Kokoro preload** (Phase 6, commit 1): the model loads in about 13 s in the background
   after startup; `/health` shows `kokoro: loading → ready`.
 - So one machine sustains about **one real-time listener**. More concurrent listeners

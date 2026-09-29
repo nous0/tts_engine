@@ -41,6 +41,11 @@ class SpeechStreamRequest(BaseModel):
     max_sentence_length: int = Field(
         200, ge=20, le=2000, description="Max chars per synthesized sentence chunk."
     )
+    fast_start: bool = Field(
+        False,
+        description="Let the first chunk end at a comma once it's 24+ chars, so audio "
+        "starts sooner (the first sentence may sound slightly split).",
+    )
 
 
 class PodcastTurn(BaseModel):

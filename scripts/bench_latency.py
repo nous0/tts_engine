@@ -4,7 +4,8 @@
     uv run python scripts/bench_latency.py --runs 5 --fast-start
     uv run python scripts/bench_latency.py --base-url http://127.0.0.1:8765
 
-For each text it calls POST /v1/speech/stream (format pcm, cache bypassed) and reports:
+For each text it calls POST /v1/speech/stream (format pcm) and reports the numbers below.
+The cache is bypassed unless ``--use-cache`` is given (then runs after the first are hits).
 
 - **TTFA**: time to first audio, from sending the request to the first audio byte.
 - **RTF**: real-time factor = generation time / audio duration. Below 1.0 means audio is
@@ -46,7 +47,7 @@ TEXTS = {
 
 
 def measure(client: httpx.Client, text: str, provider: str, voice: str | None,
-            fast_start: bool) -> dict:
+            fast_start: bool, use_cache: bool = False) -> dict:
     body = {"text": text, "provider": provider, "format": "pcm", "fast_start": fast_start}
     if voice:
         body["voice"] = voice
@@ -55,8 +56,8 @@ def measure(client: httpx.Client, text: str, provider: str, voice: str | None,
     received = 0
     gaps = 0
     silence = 0.0
-    with client.stream("POST", "/v1/speech/stream", json=body,
-                       headers={"Cache-Control": "no-cache"}) as resp:
+    headers = {} if use_cache else {"Cache-Control": "no-cache"}
+    with client.stream("POST", "/v1/speech/stream", json=body, headers=headers) as resp:
         if resp.status_code != 200:
             resp.read()
             raise SystemExit(f"HTTP {resp.status_code}: {resp.text}")
@@ -93,6 +94,8 @@ def main() -> int:
     parser.add_argument("--runs", type=int, default=3)
     parser.add_argument("--fast-start", action="store_true",
                         help="let the first chunk break at a comma (if the server supports it)")
+    parser.add_argument("--use-cache", action="store_true",
+                        help="don't bypass the cache (runs after the first become cache hits)")
     args = parser.parse_args()
 
     with httpx.Client(base_url=args.base_url, timeout=300) as client:
@@ -104,11 +107,13 @@ def main() -> int:
         print("warming up...")
         measure(client, "Warm up.", args.provider, args.voice, args.fast_start)
 
-        print(f"\nprovider={args.provider} fast_start={args.fast_start} runs={args.runs}\n")
+        print(f"\nprovider={args.provider} fast_start={args.fast_start} "
+              f"use_cache={args.use_cache} runs={args.runs}\n")
         print(f"{'text':<20} {'chars':>5} {'TTFA s':>7} {'total s':>8} {'audio s':>8} "
               f"{'RTF':>5} {'gaps':>5} {'stall s':>8}")
         for name, text in TEXTS.items():
-            runs = [measure(client, text, args.provider, args.voice, args.fast_start)
+            runs = [measure(client, text, args.provider, args.voice, args.fast_start,
+                            args.use_cache)
                     for _ in range(args.runs)]
 
             def med(key: str, runs: list[dict] = runs) -> float:
