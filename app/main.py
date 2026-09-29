@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from contextlib import asynccontextmanager
@@ -31,12 +32,22 @@ async def lifespan(app: FastAPI):
     if settings.cache_enabled:
         cache = FileCache(settings.cache_dir, settings.cache_max_mb * 1024 * 1024)
         await cache.prune()
-    app.state.engine = TTSEngine(
+    engine = TTSEngine(
         providers=providers,
         default_provider=settings.default_provider,
         default_voice=settings.default_voice,
         cache=cache,
     )
+    app.state.engine = engine
+
+    # Warm up local models in the background: startup isn't blocked, and the first
+    # request doesn't pay the model load.
+    warm_ups: list[asyncio.Task] = []
+    if settings.kokoro_preload:
+        for provider in providers.values():
+            warm_up = getattr(provider, "warm_up", None)
+            if callable(warm_up):
+                warm_ups.append(asyncio.create_task(warm_up()))
 
     output_dir = Path(settings.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -53,7 +64,10 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
+        for task in warm_ups:
+            task.cancel()
         await jobs.close()
+        engine.close()
 
 
 app = FastAPI(title="TTS Engine", version="0.1.0", lifespan=lifespan)
@@ -116,5 +130,15 @@ async def request_context(request: Request, call_next):
 
 
 @app.get("/health", tags=["meta"])
-async def health() -> dict[str, str]:
-    return {"status": "ok"}
+async def health(request: Request) -> dict:
+    """Liveness (always 200 while the process is up) plus provider readiness.
+
+    ``providers`` maps each provider to ``ready``, or for Kokoro ``idle`` (model not
+    loaded yet), ``loading`` or ``error``.
+    """
+    engine: TTSEngine = request.app.state.engine
+    return {
+        "status": "ok",
+        "default_provider": engine.default_provider,
+        "providers": engine.provider_states(),
+    }

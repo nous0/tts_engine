@@ -43,7 +43,10 @@ def test_health():
     with TestClient(app) as client:
         resp = client.get("/health")
     assert resp.status_code == 200
-    assert resp.json() == {"status": "ok"}
+    body = resp.json()
+    assert body["status"] == "ok"
+    assert isinstance(body["providers"], dict)
+    assert "default_provider" in body
 
 
 def test_speech_returns_audio():

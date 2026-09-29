@@ -17,6 +17,8 @@ def isolated_output(tmp_path, monkeypatch):
     monkeypatch.setenv("OUTPUT_DIR", str(out_dir))
     monkeypatch.setenv("JOBS_DB", str(out_dir / "jobs.db"))
     monkeypatch.setenv("CACHE_DIR", str(out_dir / "cache"))
+    # Never load the real Kokoro model at app startup in tests.
+    monkeypatch.setenv("KOKORO_PRELOAD", "false")
     get_settings.cache_clear()
     yield out_dir
     get_settings.cache_clear()

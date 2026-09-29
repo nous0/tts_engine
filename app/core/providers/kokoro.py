@@ -23,6 +23,7 @@ import importlib.metadata
 import importlib.util
 import logging
 import threading
+import time
 from collections.abc import AsyncIterator, Callable, Iterator
 from concurrent.futures import Executor, ThreadPoolExecutor
 
@@ -143,9 +144,44 @@ class KokoroProvider:
         self._default_voice = default_voice
         self._pipelines: dict[str, object] = {}  # lang_code -> KPipeline (lazy)
         self._pipeline_lock = threading.Lock()
+        self._loading = False
+        self._load_error: str | None = None
         self._executor = ThreadPoolExecutor(
             max_workers=max(1, max_concurrency), thread_name_prefix="kokoro"
         )
+
+    @property
+    def state(self) -> str:
+        """``idle`` (model not loaded yet), ``loading``, ``ready`` or ``error``."""
+        if self._loading:
+            return "loading"
+        if self._pipelines:
+            return "ready"
+        return "error" if self._load_error else "idle"
+
+    async def warm_up(self) -> None:
+        """Load the model for the default voice and run one tiny synthesis.
+
+        Started in the background at server startup (``KOKORO_PRELOAD``), so the first
+        real request doesn't pay the ~10 s model load. Runs on the Kokoro executor,
+        so it queues with requests like any other synthesis. Never raises.
+        """
+        if self._pipelines:
+            return
+        started = time.perf_counter()
+        self._loading = True  # visible as "loading" before the executor picks it up
+        try:
+            await self.synthesize("Hello.", self._default_voice, SynthOpts(format="pcm"))
+        except Exception:  # noqa: BLE001 - state and log report it; startup goes on
+            log.exception("Kokoro warm-up failed")
+            return
+        finally:
+            self._loading = False
+        log.info("Kokoro ready in %.1f s", time.perf_counter() - started)
+
+    def close(self) -> None:
+        """Drop queued work on shutdown; a synthesis already running finishes."""
+        self._executor.shutdown(wait=False, cancel_futures=True)
 
     @property
     def default_voice(self) -> str:
@@ -174,13 +210,18 @@ class KokoroProvider:
                         'Kokoro is not installed. Run: pip install -e ".[local]"'
                     ) from exc
                 log.info("loading Kokoro pipeline (lang=%s)", lang_code)
+                self._loading = True
                 try:
                     pipe = KPipeline(lang_code=lang_code)
                 except Exception as exc:  # download/load failure: report, don't crash
                     log.exception("Kokoro model failed to load")
+                    self._load_error = str(exc)
                     raise ProviderError(
                         self.name, f"could not load the model ({exc})", kind="upstream"
                     ) from exc
+                finally:
+                    self._loading = False
+                self._load_error = None
                 self._pipelines[lang_code] = pipe
         return pipe
 

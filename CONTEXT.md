@@ -88,6 +88,23 @@ Last checked: 2026-09-29.
 
 - Real-time factor about **0.73** (1 s of audio takes about 0.73 s to make); short
   sentence about 1.0–1.5 s to audio; model load 9.7 s when already downloaded.
+- **Streaming baseline** (`scripts/bench_latency.py`, HTTP stream, pcm, no cache, median
+  of 3, before Phase 6 optimizations):
+
+  | text | chars | TTFA s | total s | audio s | RTF | gaps | stall s |
+  |---|---|---|---|---|---|---|---|
+  | short | 27 | 1.40 | 1.40 | 2.05 | 0.68 | 0 | 0.00 |
+  | medium | 79 | 3.07 | 3.07 | 4.90 | 0.63 | 0 | 0.00 |
+  | long first sentence | 171 | 4.78 | 6.26 | 10.68 | 0.59 | 0 | 0.00 |
+  | paragraph | 184 | 0.97 | 9.03 | 13.68 | 0.66 | 1 | 0.61 |
+
+  TTFA is the time to synthesize the whole first sentence, so it grows with its length.
+  The paragraph stalls because "Hello!" plays for less time than the next sentence takes
+  to make. Splitting chunks smaller lowers TTFA but can add stalls like this, unless the
+  next chunk is at most about 1.5× the previous one's length (since RTF ≈ 0.65), or the
+  client buffers a little before playing.
+- **Kokoro preload** (Phase 6, commit 1): the model loads in about 13 s in the background
+  after startup; `/health` shows `kokoro: loading → ready`.
 - So one machine sustains about **one real-time listener**. More concurrent listeners
   need OpenAI or a GPU. `KOKORO_MAX_CONCURRENCY=1` is right for this CPU.
 

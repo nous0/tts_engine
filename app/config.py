@@ -19,6 +19,8 @@ class Settings(BaseSettings):
     kokoro_voice: str = "af_heart"
     # How many Kokoro syntheses may run at once (each one uses all CPU cores anyway).
     kokoro_max_concurrency: int = Field(1, ge=1, le=8)
+    # Load the model in the background at startup, so the first request doesn't wait.
+    kokoro_preload: bool = True
     openai_api_key: str | None = None
     openai_tts_model: str = "gpt-4o-mini-tts"
     openai_voice: str = "alloy"

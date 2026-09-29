@@ -7,6 +7,7 @@ package and its model are never needed.
 from __future__ import annotations
 
 import asyncio
+import importlib.machinery
 import sys
 import threading
 import time
@@ -216,3 +217,101 @@ async def test_model_load_failure_is_a_provider_error(monkeypatch):
         await provider.synthesize("hi", "af_heart", SynthOpts(format="pcm"))
     assert info.value.kind == "upstream"
     assert "could not load the model" in str(info.value)
+
+
+def _fake_kokoro_module(pipeline_cls) -> types.ModuleType:
+    module = types.ModuleType("kokoro")
+    module.__spec__ = importlib.machinery.ModuleSpec("kokoro", None)
+    module.KPipeline = pipeline_cls
+    return module
+
+
+class TinyKPipeline:
+    """Loads instantly and returns one short segment."""
+
+    created = 0
+
+    def __init__(self, lang_code):
+        TinyKPipeline.created += 1
+
+    def __call__(self, text, voice, speed):
+        yield ("g", "p", np.array([0.1, -0.1], dtype="float32"))
+
+
+async def test_warm_up_loads_the_model_once_and_reports_ready(monkeypatch):
+    TinyKPipeline.created = 0
+    monkeypatch.setitem(sys.modules, "kokoro", _fake_kokoro_module(TinyKPipeline))
+    provider = KokoroProvider()
+    assert provider.state == "idle"
+
+    await provider.warm_up()
+    assert provider.state == "ready"
+    await provider.warm_up()  # no-op once loaded
+    await provider.synthesize("hi", "af_heart", SynthOpts(format="pcm"))
+    assert TinyKPipeline.created == 1
+
+
+async def test_warm_up_failure_is_reported_not_raised(monkeypatch):
+    class BrokenKPipeline:
+        def __init__(self, lang_code):
+            raise OSError("offline")
+
+    monkeypatch.setitem(sys.modules, "kokoro", _fake_kokoro_module(BrokenKPipeline))
+    provider = KokoroProvider()
+    await provider.warm_up()  # must not raise
+    assert provider.state == "error"
+
+
+async def test_state_is_loading_while_the_model_loads(monkeypatch):
+    release = threading.Event()
+
+    class SlowKPipeline(TinyKPipeline):
+        def __init__(self, lang_code):
+            release.wait(5)
+
+    monkeypatch.setitem(sys.modules, "kokoro", _fake_kokoro_module(SlowKPipeline))
+    provider = KokoroProvider()
+    task = asyncio.create_task(provider.warm_up())
+    await asyncio.sleep(0.1)
+    assert provider.state == "loading"
+    release.set()
+    await task
+    assert provider.state == "ready"
+
+
+def test_app_preloads_kokoro_in_the_background(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from app.config import get_settings
+    from app.main import app
+
+    TinyKPipeline.created = 0
+    monkeypatch.setitem(sys.modules, "kokoro", _fake_kokoro_module(TinyKPipeline))
+    monkeypatch.setenv("KOKORO_PRELOAD", "true")
+    monkeypatch.setenv("DEFAULT_PROVIDER", "kokoro")
+    get_settings.cache_clear()
+
+    with TestClient(app) as client:
+        deadline = time.monotonic() + 5
+        state = None
+        while time.monotonic() < deadline:
+            state = client.get("/health").json()["providers"].get("kokoro")
+            if state == "ready":
+                break
+            time.sleep(0.05)
+    assert state == "ready"
+    assert TinyKPipeline.created == 1
+
+
+def test_app_does_not_preload_when_disabled(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from app.main import app
+
+    TinyKPipeline.created = 0
+    monkeypatch.setitem(sys.modules, "kokoro", _fake_kokoro_module(TinyKPipeline))
+    with TestClient(app) as client:  # conftest sets KOKORO_PRELOAD=false
+        time.sleep(0.2)
+        state = client.get("/health").json()["providers"].get("kokoro")
+    assert state == "idle"
+    assert TinyKPipeline.created == 0

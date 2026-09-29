@@ -69,6 +69,19 @@ class TTSEngine:
         """Names of the registered (usable) providers, sorted."""
         return sorted(self._providers)
 
+    def provider_states(self) -> dict[str, str]:
+        """Readiness per provider: ``ready``, or e.g. ``loading`` while a model loads."""
+        return {
+            name: getattr(p, "state", "ready") for name, p in sorted(self._providers.items())
+        }
+
+    def close(self) -> None:
+        """Release provider resources (thread pools) on shutdown."""
+        for provider in self._providers.values():
+            close = getattr(provider, "close", None)
+            if callable(close):
+                close()
+
     def get_provider(self, name: str | None = None) -> TTSProvider:
         name = name or self._default_provider
         provider = self._providers.get(name)

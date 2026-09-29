@@ -38,7 +38,11 @@ uv run streamlit run streamlit_app.py      # optional browser test UI
 ```
 
 - Swagger UI: http://127.0.0.1:8000/docs
-- Health: http://127.0.0.1:8000/health
+- Health: http://127.0.0.1:8000/health returns readiness per provider, e.g.
+  `{"status": "ok", "default_provider": "kokoro", "providers": {"kokoro": "ready", "openai": "ready"}}`.
+  Kokoro loads in the background at startup (`KOKORO_PRELOAD=true`), so it shows
+  `loading` for about 10 s, then `ready`. Other states are `idle` (not loaded yet) and
+  `error`.
 
 Run **one** server process (no `--workers N`): background jobs live in the process's
 memory, so several workers can't see or cancel each other's jobs.
@@ -185,6 +189,7 @@ It exits 1 if any check fails:
 uv run uvicorn app.main:app --port 8000          # terminal 1
 uv run python scripts/smoke_test.py              # terminal 2: 22 checks, about 1 minute
 uv run python scripts/smoke_test.py --skip-jobs  # without the job queue/cancel checks
+uv run python scripts/bench_latency.py           # streaming latency: TTFA, RTF, stalls
 
 # Restart recovery (two steps, with a server restart in between):
 uv run python scripts/smoke_test.py --leave-running-job

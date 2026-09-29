@@ -32,6 +32,7 @@ uv run pytest tests/test_chunker.py::test_name   # one test
 uv run pytest -k kokoro                          # by keyword
 
 uv run python scripts/smoke_test.py              # E2E against a running server (real Kokoro)
+uv run python scripts/bench_latency.py           # streaming TTFA / RTF / stalls against a server
 
 uv run ruff check .                              # lint (E,F,I,UP,B; line length 100)
 uv run ruff format .
@@ -78,6 +79,9 @@ Request flow: **route → `TTSEngine` → provider → (podcast only) audio pipe
   SQLite calls use. `KPipeline` creation is behind a lock. `_aiter_blocking` bridges the
   blocking generator to async with `call_soon_threadsafe` and a stop flag, so client
   disconnects don't leak threads. Keep this pattern for any blocking backend.
+  `warm_up()` preloads the model at startup (`KOKORO_PRELOAD`, off in tests via
+  conftest). `state` (`idle|loading|ready|error`) feeds `/health` through
+  `TTSEngine.provider_states()`, and `engine.close()` shuts the pool down.
 - **Errors**: providers raise `ProviderError(kind=timeout|rate_limited|auth|bad_request|upstream)`.
   Exception handlers in `app/main.py` map it to 504/503/502/400, and map
   `ProviderNotConfigured`, `UnsupportedFormat` and `InvalidRequest` (incl. `InvalidVoice`)
