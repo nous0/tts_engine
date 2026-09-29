@@ -177,3 +177,22 @@ uv run python examples/generate_podcast.py examples/script.json --provider kokor
 uv run pytest        # hermetic: providers are mocked, no API keys needed
 uv run ruff check .
 ```
+
+End-to-end smoke test against a running server, with real Kokoro and no OpenAI calls.
+It exits 1 if any check fails:
+
+```bash
+uv run uvicorn app.main:app --port 8000          # terminal 1
+uv run python scripts/smoke_test.py              # terminal 2: 22 checks, about 1 minute
+uv run python scripts/smoke_test.py --skip-jobs  # without the job queue/cancel checks
+
+# Restart recovery (two steps, with a server restart in between):
+uv run python scripts/smoke_test.py --leave-running-job
+uv run python scripts/smoke_test.py --check-interrupted <job_id>
+```
+
+It checks health, request ids, cache miss/hit, a single WAV header when streaming, a
+client hanging up mid-stream, error statuses, concurrency, the job queue and cancel. It
+also saves `output/smoke_stream.wav`: listen to it to confirm there are no clicks between
+sentences.
+```

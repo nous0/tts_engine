@@ -1,0 +1,268 @@
+"""End-to-end smoke test against a running server (real Kokoro, no mocks).
+
+Start the server first, in another terminal:
+
+    uv run uvicorn app.main:app --port 8000
+
+Then run:
+
+    uv run python scripts/smoke_test.py                  # all checks
+    uv run python scripts/smoke_test.py --skip-jobs      # skip the ~1 min job checks
+    uv run python scripts/smoke_test.py --base-url http://127.0.0.1:8765
+
+Restart recovery needs a server restart in the middle, so it is split in two steps:
+
+    uv run python scripts/smoke_test.py --leave-running-job   # prints a job id
+    # stop the server (Ctrl+C, or kill it), start it again, then:
+    uv run python scripts/smoke_test.py --check-interrupted <job_id>
+
+Exits with status 1 if any check fails. OpenAI is never called, so no quota is used.
+The first request after a server start can take ~40 s while Kokoro loads.
+"""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import sys
+import time
+from pathlib import Path
+
+import httpx
+
+LONG_SCRIPT = "\n".join(
+    f"Alice: This is line number {i} of a long test episode."
+    if i % 2 == 0
+    else f"Bob: And this is reply number {i}, which keeps the show going."
+    for i in range(20)
+)
+
+
+class Checks:
+    def __init__(self) -> None:
+        self.failed = 0
+        self.passed = 0
+
+    def check(self, name: str, ok: bool, detail: str = "") -> bool:
+        status = "PASS" if ok else "FAIL"
+        print(f"  [{status}] {name}" + (f"  ({detail})" if detail else ""))
+        if ok:
+            self.passed += 1
+        else:
+            self.failed += 1
+        return ok
+
+    def skip(self, name: str, why: str) -> None:
+        print(f"  [SKIP] {name}  ({why})")
+
+
+def section(title: str) -> None:
+    print(f"\n== {title}")
+
+
+async def wait_for_status(
+    client: httpx.AsyncClient, job_id: str, wanted: set[str], timeout: float = 120
+) -> str:
+    deadline = time.monotonic() + timeout
+    status = "?"
+    while time.monotonic() < deadline:
+        status = (await client.get(f"/v1/jobs/{job_id}")).json()["status"]
+        if status in wanted:
+            return status
+        await asyncio.sleep(0.3)
+    return status
+
+
+async def run_checks(client: httpx.AsyncClient, provider: str, skip_jobs: bool) -> Checks:
+    c = Checks()
+
+    section("Server")
+    r = await client.get("/health", headers={"X-Request-ID": "smoke-123"})
+    c.check("GET /health", r.status_code == 200)
+    c.check("X-Request-ID is echoed back", r.headers.get("x-request-id") == "smoke-123")
+    voices = (await client.get("/v1/voices")).json()
+    c.check(
+        f"provider '{provider}' is registered",
+        provider in voices["providers"],
+        f"registered: {voices['providers']}",
+    )
+    if provider not in voices["providers"]:
+        return c
+
+    print("  ... warming up the model (first request can take ~40 s)")
+    # Streaming is never cached, so this really loads the model.
+    await client.post("/v1/speech/stream", json={"text": "Warm up.", "provider": provider})
+
+    section("Cache")
+    text = f"Smoke test cache check {time.time():.0f}."
+    started = time.perf_counter()
+    first = await client.post("/v1/speech", json={"text": text, "provider": provider})
+    miss_s = time.perf_counter() - started
+    started = time.perf_counter()
+    second = await client.post("/v1/speech", json={"text": text, "provider": provider})
+    hit_s = time.perf_counter() - started
+    c.check(
+        "first call is a miss, second a hit",
+        (first.headers.get("x-cache"), second.headers.get("x-cache")) == ("miss", "hit"),
+        f"miss {miss_s:.2f}s, hit {hit_s:.3f}s",
+    )
+    c.check("cached audio is identical", first.content == second.content)
+
+    section("Streaming")
+    r = await client.post(
+        "/v1/speech/stream",
+        json={
+            "text": "First sentence here. Second one follows. And a third one.",
+            "provider": provider,
+            "format": "wav",
+        },
+    )
+    headers = r.content.count(b"RIFF")
+    c.check("multi-sentence WAV stream has one header", r.status_code == 200 and headers == 1,
+            f"status {r.status_code}, RIFF headers: {headers}")
+    out = Path("output") / "smoke_stream.wav"
+    out.parent.mkdir(exist_ok=True)
+    out.write_bytes(r.content)
+    print(f"  -> saved {out}: listen to it, there should be no click between sentences")
+
+    long_text = " ".join(f"This is streamed sentence number {i}." for i in range(30))
+    try:
+        async with client.stream(
+            "POST", "/v1/speech/stream",
+            json={"text": long_text, "provider": provider, "format": "pcm"},
+        ) as s:
+            async for _ in s.aiter_bytes():
+                break  # hang up after the first chunk
+    except httpx.HTTPError:
+        pass
+    r = await client.post("/v1/speech", json={"text": "Still alive?", "provider": provider})
+    c.check("server keeps working after a client hangs up mid-stream", r.status_code == 200,
+            "with LOG_LEVEL=DEBUG the log shows 'producer stopped'")
+
+    section("Errors")
+    cases = [
+        ("unknown voice -> 400", "/v1/speech",
+         {"text": "Hi", "provider": provider, "voice": "no-such-voice"}, 400),
+        ("voice that looks like a file path -> 400", "/v1/speech",
+         {"text": "Hi", "provider": provider, "voice": "C:/x/voice.pt"}, 400),
+        ("unknown voice on the stream endpoint -> 400", "/v1/speech/stream",
+         {"text": "Hi", "provider": provider, "voice": "no-such-voice"}, 400),
+        ("flac on the stream endpoint -> 400", "/v1/speech/stream",
+         {"text": "Hi", "provider": provider, "format": "flac"}, 400),
+        ("unregistered provider -> 400", "/v1/speech",
+         {"text": "Hi", "provider": "gemini"}, 400),
+        ("podcast with an unknown voice -> 400 at submit", "/v1/podcast",
+         {"script": "Alice: Hi.", "provider": provider, "voices": {"Alice": "nope"}}, 400),
+        ("podcast with an invalid gender -> 422", "/v1/podcast",
+         {"script": "Host: Hi.", "provider": provider, "genders": {"Host": "robot"}}, 422),
+    ]
+    for name, path, body, expected in cases:
+        r = await client.post(path, json=body)
+        c.check(name, r.status_code == expected, f"got {r.status_code}")
+
+    section("Concurrency")
+    texts = [f"Parallel request {i} at {time.time():.3f}." for i in range(3)]
+    tasks = [
+        asyncio.create_task(client.post("/v1/speech", json={"text": t, "provider": provider}))
+        for t in texts
+    ]
+    await asyncio.sleep(0.3)
+    started = time.perf_counter()
+    r = await client.get("/v1/jobs")
+    poll_ms = (time.perf_counter() - started) * 1000
+    results = await asyncio.gather(*tasks)
+    c.check("3 parallel syntheses all succeed", all(x.status_code == 200 for x in results))
+    c.check("GET /v1/jobs stays responsive meanwhile", r.status_code == 200 and poll_ms < 1000,
+            f"{poll_ms:.0f} ms")
+
+    section("Jobs")
+    if skip_jobs:
+        c.skip("job queue and cancel", "--skip-jobs")
+        return c
+    r = await client.post("/v1/podcast", json={"script": LONG_SCRIPT, "provider": provider})
+    job1 = r.json()["job_id"]
+    status1 = await wait_for_status(client, job1, {"running", "done", "error"})
+    r = await client.post(
+        "/v1/podcast", json={"script": LONG_SCRIPT + "\nAlice: Bye.", "provider": provider}
+    )
+    job2 = r.json()["job_id"]
+    await asyncio.sleep(0.5)
+    status2 = (await client.get(f"/v1/jobs/{job2}")).json()["status"]
+    if status2 == "running":
+        c.skip("second job waits as queued", "MAX_CONCURRENT_JOBS > 1?")
+    else:
+        c.check("second job waits as queued", (status1, status2) == ("running", "queued"),
+                f"job1={status1}, job2={status2}")
+
+    r = await client.post(f"/v1/jobs/{job2}/cancel")
+    c.check("cancel a queued job", r.status_code == 200 and r.json()["status"] == "cancelled")
+    r = await client.post(f"/v1/jobs/{job2}/cancel")
+    c.check("cancelling it again -> 409", r.status_code == 409)
+    started = time.perf_counter()
+    r = await client.post(f"/v1/jobs/{job1}/cancel")
+    c.check("cancel a running job", r.status_code == 200 and r.json()["status"] == "cancelled",
+            f"took {time.perf_counter() - started:.2f}s")
+    r = await client.get(f"/v1/jobs/{job1}/audio")
+    c.check("audio of a cancelled job -> 409", r.status_code == 409)
+    r = await client.post("/v1/jobs/does-not-exist/cancel")
+    c.check("cancel an unknown job -> 404", r.status_code == 404)
+    return c
+
+
+async def leave_running_job(client: httpx.AsyncClient, provider: str) -> int:
+    r = await client.post("/v1/podcast", json={"script": LONG_SCRIPT, "provider": provider})
+    job_id = r.json()["job_id"]
+    status = await wait_for_status(client, job_id, {"running", "done", "error"})
+    print(f"job {job_id} is {status}.")
+    print("Now stop the server (Ctrl+C or kill it), start it again, then run:")
+    print(f"  uv run python scripts/smoke_test.py --check-interrupted {job_id}")
+    return 0 if status == "running" else 1
+
+
+async def check_interrupted(client: httpx.AsyncClient, job_id: str) -> int:
+    r = await client.get(f"/v1/jobs/{job_id}")
+    if r.status_code != 200:
+        print(f"  [FAIL] job {job_id} not found ({r.status_code})")
+        return 1
+    job = r.json()
+    ok = job["status"] == "error" and (
+        "restart" in (job["error"] or "") or "shutdown" in (job["error"] or "")
+    )
+    print(f"  [{'PASS' if ok else 'FAIL'}] job after restart: {job['status']} - {job['error']}")
+    return 0 if ok else 1
+
+
+async def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    parser.add_argument("--base-url", default="http://127.0.0.1:8000")
+    parser.add_argument("--provider", default="kokoro", help="provider to exercise")
+    parser.add_argument("--skip-jobs", action="store_true", help="skip job queue/cancel checks")
+    parser.add_argument("--leave-running-job", action="store_true",
+                        help="start a long job for the restart check and exit")
+    parser.add_argument("--check-interrupted", metavar="JOB_ID",
+                        help="after a restart, check that JOB_ID was marked as interrupted")
+    args = parser.parse_args()
+
+    async with httpx.AsyncClient(base_url=args.base_url, timeout=600) as client:
+        try:
+            await client.get("/health")
+        except httpx.HTTPError:
+            print(f"Can't reach {args.base_url}. Start the server first:")
+            print("  uv run uvicorn app.main:app --port 8000")
+            return 2
+
+        if args.leave_running_job:
+            return await leave_running_job(client, args.provider)
+        if args.check_interrupted:
+            return await check_interrupted(client, args.check_interrupted)
+
+        started = time.perf_counter()
+        checks = await run_checks(client, args.provider, args.skip_jobs)
+
+    print(f"\n{checks.passed} passed, {checks.failed} failed "
+          f"in {time.perf_counter() - started:.0f}s")
+    return 1 if checks.failed else 0
+
+
+if __name__ == "__main__":
+    sys.exit(asyncio.run(main()))

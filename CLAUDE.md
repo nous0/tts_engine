@@ -31,6 +31,8 @@ uv run pytest tests/test_podcast.py              # one file
 uv run pytest tests/test_chunker.py::test_name   # one test
 uv run pytest -k kokoro                          # by keyword
 
+uv run python scripts/smoke_test.py              # E2E against a running server (real Kokoro)
+
 uv run ruff check .                              # lint (E,F,I,UP,B; line length 100)
 uv run ruff format .
 

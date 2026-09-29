@@ -71,6 +71,10 @@ Last checked: 2026-09-28.
 - A static route for `./output/` is **not needed**: `GET /v1/jobs/{id}/audio` already
   serves results (409 before done, 410 if the file is gone).
 
+- **`scripts/smoke_test.py` (2026-09-29):** end-to-end checks against a running
+  server, with real Kokoro and no OpenAI calls. 22/22 pass, and the two-step restart
+  check passes. Run it after any change to streaming, jobs, the cache or error handling.
+
 ## Immediate to-dos (in rough priority order)
 
 1. **Listen** to a streamed WAV (e.g. via Streamlit) and confirm the sentence-boundary
