@@ -4,7 +4,7 @@ Read this before picking up work in this repo. It says where things actually
 stand. Update it at the end of each work session; this file goes stale fast if
 nobody touches it.
 
-Last checked: 2026-09-28.
+Last checked: 2026-09-29.
 
 ## Where things actually stand
 
@@ -75,26 +75,69 @@ Last checked: 2026-09-28.
   server, with real Kokoro and no OpenAI calls. 22/22 pass, and the two-step restart
   check passes. Run it after any change to streaming, jobs, the cache or error handling.
 
-## Immediate to-dos (in rough priority order)
+## Decisions (2026-09-29)
 
-1. **Listen** to a streamed WAV (e.g. via Streamlit) and confirm the sentence-boundary
-   clicks are gone. Also listen to `output/script_trio.wav`. Tests can't judge audio.
-2. **Preload Kokoro at startup** (background task), so the first request doesn't wait
-   about 40 s. This was P2 in the Phase 5 review.
-3. **Cache streaming per sentence.** Repeated chatbot phrases are the biggest cache win,
-   and streaming is all PCM now, so this is straightforward. This was P2 as well.
-4. **Detailed `/health`**: providers, ffmpeg, Kokoro loaded, cache size, running jobs. P2.
-5. Optionally, verify a podcast render with OpenAI (this uses API quota).
-6. Grow the name table in `app/core/names.py` when real scripts show misses.
+- **Language: English only.** Kokoro covers it; no Vietnamese provider is planned. Kokoro
+  supports en-US/en-GB, es, fr, hi, it, pt-br, ja and zh, but not Vietnamese. Revisit if
+  the audience changes.
+- **Priority: chatbot first**, then podcast, then packaging.
+- **Chatbot integration: none exists yet**, so we build a complete demo (OpenAI chat
+  streaming → our TTS → speakers).
 
-## Longer-term
+## Measured baseline (Kokoro on this CPU, 2026-09-29)
 
-- `Dockerfile` with ffmpeg (needed for mp3/opus/aac/flac); expect a 3–4 GB image with
-  Kokoro/torch.
-- API key auth and CORS if this is ever exposed beyond localhost.
-- Multi-worker or multi-host: move jobs to Celery/RQ plus object storage, and the cache
-  to shared storage.
-- Single-flight for identical concurrent requests (today both synthesize; harmless but
-  wasteful).
-- Revisit SSE/WebSocket if chunked HTTP isn't enough for the chatbot client.
-- Optional: an LLM script generator, so "make a podcast about X" is one call.
+- Real-time factor about **0.73** (1 s of audio takes about 0.73 s to make); short
+  sentence about 1.0–1.5 s to audio; model load 9.7 s when already downloaded.
+- So one machine sustains about **one real-time listener**. More concurrent listeners
+  need OpenAI or a GPU. `KOKORO_MAX_CONCURRENCY=1` is right for this CPU.
+
+## Roadmap to the final goal
+
+**Final goal:** one engine that (1) lets a chatbot speak while the LLM is still writing,
+and (2) turns a topic or script into a finished multi-voice podcast.
+
+### Phase 6: real-time chatbot (next)
+
+1. Preload Kokoro at startup (background) and report it in `/health`.
+2. `scripts/bench_latency.py`: measure time to first audio and RTF, to get a baseline
+   before optimizing.
+3. **WebSocket `/v1/speech/ws`**: the client sends LLM token deltas, the server chunks
+   sentences (`SentenceChunker`) and streams PCM back while text keeps arriving. It
+   supports `flush` (end of turn) and `cancel` (barge-in: stop speaking now), and
+   synthesizes the next sentence while the current one plays.
+4. Faster first audio: allow the first chunk to break at a comma.
+5. Per-sentence cache for streaming (HTTP stream and WebSocket).
+6. **Demo `examples/voice_chat.py`**: type a question, OpenAI chat streams the answer,
+   the WebSocket turns it into speech, and it plays on the speakers. Press Enter to
+   interrupt. It prints time to first audio.
+7. Smoke-test and docs updates.
+
+**Done when:** first audio within about 1.5 s of the LLM finishing its first sentence,
+no stutter for one listener, and barge-in works.
+
+### Phase 7: complete podcast
+
+- ffmpeg for mp3 output.
+- Loudness normalization to about −16 LUFS (today it is peak only).
+- Topic → LLM-written dialogue → rendered episode.
+- Retry endpoint for failed jobs (cached turns make it cheap).
+
+**Done when:** a topic goes in and a normalized mp3 comes out.
+
+### Phase 9: packaging and operations
+
+- Dockerfile with ffmpeg.
+- API key and CORS.
+- CI (pytest and ruff).
+- Detailed `/health` and metrics.
+
+(Phase 8, a Vietnamese provider, was dropped by the language decision.)
+
+### Smaller follow-ups
+
+- Listen to `output/smoke_stream.wav` and confirm there are no clicks between sentences.
+- Optionally, verify a podcast render with OpenAI (this uses API quota).
+- Grow the name table in `app/core/names.py` when real scripts show misses.
+- Single-flight for identical concurrent requests.
+- Multi-worker/multi-host only if ever needed: Celery/RQ, object storage, a shared
+  cache.
