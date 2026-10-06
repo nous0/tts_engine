@@ -24,11 +24,14 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import sys
 import time
 from pathlib import Path
 
 import httpx
+from websockets.asyncio.client import connect
+from websockets.exceptions import ConnectionClosed, InvalidStatus
 
 LONG_SCRIPT = "\n".join(
     f"Alice: This is line number {i} of a long test episode."
@@ -175,6 +178,8 @@ async def run_checks(client: httpx.AsyncClient, provider: str, skip_jobs: bool) 
     c.check("GET /v1/jobs stays responsive meanwhile", r.status_code == 200 and poll_ms < 1000,
             f"{poll_ms:.0f} ms")
 
+    await run_ws_checks(c, str(client.base_url), provider)
+
     section("Jobs")
     if skip_jobs:
         c.skip("job queue and cancel", "--skip-jobs")
@@ -207,6 +212,120 @@ async def run_checks(client: httpx.AsyncClient, provider: str, skip_jobs: bool) 
     r = await client.post("/v1/jobs/does-not-exist/cancel")
     c.check("cancel an unknown job -> 404", r.status_code == 404)
     return c
+
+
+async def _turn(ws, text: str, timeout: float = 90) -> dict:
+    """Send one turn and collect what comes back until it ends."""
+    await ws.send(json.dumps({"type": "text", "text": text}))
+    await ws.send(json.dumps({"type": "flush"}))
+    out: dict = {"sentences": [], "audio": 0, "end": None}
+
+    async def collect() -> None:
+        async for raw in ws:
+            if isinstance(raw, bytes):
+                out["audio"] += len(raw)
+                continue
+            event = json.loads(raw)
+            if event["type"] == "sentence":
+                out["sentences"].append(event)
+            elif event["type"] in ("done", "cancelled") or "turn" in event:
+                out["end"] = event
+                return
+
+    await asyncio.wait_for(collect(), timeout)
+    return out
+
+
+async def _first_audio(ws, timeout: float = 60) -> list[dict]:
+    """Read until the first audio frame; return the events seen before it."""
+    seen: list[dict] = []
+
+    async def read() -> None:
+        async for raw in ws:
+            if isinstance(raw, bytes):
+                return
+            seen.append(json.loads(raw))
+
+    await asyncio.wait_for(read(), timeout)
+    return seen
+
+
+async def run_ws_checks(c: Checks, base_url: str, provider: str) -> None:
+    section("WebSocket")
+    url = base_url.replace("http://", "ws://").replace("https://", "wss://").rstrip("/")
+    url += "/v1/speech/ws"
+    start = {"type": "start", "provider": provider}
+
+    async with connect(url, max_size=None) as ws:
+        await ws.send(json.dumps(start))  # chunking defaults to adaptive
+        ready = json.loads(await ws.recv())
+        c.check("start -> ready", ready.get("type") == "ready"
+                and (ready.get("sample_rate"), ready.get("format")) == (24000, "pcm"),
+                f"voice={ready.get('voice')}")
+        await ws.send(json.dumps({"type": "text", "text": (
+            "This first sentence is long enough to be spoken before the turn ends, "
+            "while the rest of the answer is still being written. And then")}))
+        seen = await _first_audio(ws)
+        c.check("audio arrives before the turn is flushed", True)
+        sentence = next((e for e in seen if e.get("type") == "sentence"), {})
+        c.check("sentence events carry text and boundary",
+                bool(sentence.get("text")) and sentence.get("boundary") in
+                ("sentence", "clause", "line", "word", "end"),
+                f"{sentence.get('boundary')}: {sentence.get('text', '')[:40]!r}")
+        await ws.send(json.dumps({"type": "text", "text": " a second sentence."}))
+        await ws.send(json.dumps({"type": "flush"}))
+        end = None
+        async for raw in ws:
+            if not isinstance(raw, bytes) and json.loads(raw)["type"] in ("done", "error"):
+                end = json.loads(raw)
+                break
+        c.check("flush -> done", end is not None and end["type"] == "done")
+
+        # Barge-in on the same session, then a normal turn again.
+        await ws.send(json.dumps({"type": "text", "text": (
+            "Here is a long answer that will be interrupted part of the way through. "
+            "It keeps going with more sentences. And even more after that one.")}))
+        await ws.send(json.dumps({"type": "flush"}))
+        await _first_audio(ws)
+        await ws.send(json.dumps({"type": "cancel"}))
+        cancelled = False
+        async for raw in ws:
+            if not isinstance(raw, bytes) and json.loads(raw)["type"] == "cancelled":
+                cancelled = True
+                break
+        c.check("cancel -> cancelled", cancelled)
+        after = await _turn(ws, "Back again after the cancel, speaking normally now.")
+        c.check("the session works after a cancel", (after["end"] or {}).get("type") == "done")
+
+    async with connect(url, max_size=None) as ws:
+        await ws.send(json.dumps({**start, "chunking": "sentence"}))
+        await ws.recv()
+        tricky = await _turn(ws, "It takes 3.5 seconds, e.g. on Dr. Smith's laptop. Done.")
+        texts = [s["text"] for s in tricky["sentences"]]
+        c.check("decimals and abbreviations aren't split",
+                texts == ["It takes 3.5 seconds, e.g. on Dr. Smith's laptop.", "Done."],
+                f"{texts}")
+        again = await _turn(ws, "It takes 3.5 seconds, e.g. on Dr. Smith's laptop. Done.")
+        c.check("a repeated turn comes from the cache",
+                all(s["cached"] for s in again["sentences"]) and again["sentences"])
+
+    async with connect(url, max_size=None) as ws:
+        await ws.send(json.dumps({**start, "voice": "no-such-voice"}))
+        error = json.loads(await ws.recv())
+        try:
+            await asyncio.wait_for(ws.recv(), 5)
+            code = None
+        except ConnectionClosed as exc:
+            code = exc.rcvd.code if exc.rcvd else None
+        c.check("a bad start gets an error and close 1008",
+                error.get("type") == "error" and code == 1008, f"close code {code}")
+
+    try:
+        async with connect(url, origin="https://evil.example"):
+            refused = False
+    except InvalidStatus:
+        refused = True
+    c.check("a browser page from an unknown origin is refused", refused)
 
 
 async def leave_running_job(client: httpx.AsyncClient, provider: str) -> int:

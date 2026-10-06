@@ -290,7 +290,7 @@ It exits 1 if any check fails:
 
 ```bash
 uv run uvicorn app.main:app --port 8000          # terminal 1
-uv run python scripts/smoke_test.py              # terminal 2: 22 checks, about 1 minute
+uv run python scripts/smoke_test.py              # terminal 2: 32 checks, about 1.5 minutes
 uv run python scripts/smoke_test.py --skip-jobs  # without the job queue/cancel checks
 uv run python scripts/bench_latency.py           # streaming latency: TTFA, RTF, stalls
 uv run python scripts/bench_latency.py --mode ws --chunking all --wps 5,15,40   # chatbot view
@@ -301,7 +301,10 @@ uv run python scripts/smoke_test.py --check-interrupted <job_id>
 ```
 
 It checks health, request ids, cache miss/hit, a single WAV header when streaming, a
-client hanging up mid-stream, error statuses, concurrency, the job queue and cancel. It
+client hanging up mid-stream, error statuses, concurrency, the WebSocket session
+(ready, audio before flush, chunk text and boundary, done, cancel, decimals and
+abbreviations kept whole, cache hits, a refused bad start and a refused foreign origin),
+and the job queue and cancel. It
 also saves `output/smoke_stream.wav`: listen to it to confirm there are no clicks between
 sentences.
 ```

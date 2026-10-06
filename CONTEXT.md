@@ -103,6 +103,18 @@ Last checked: 2026-09-29.
   to make. Splitting chunks smaller lowers TTFA but can add stalls like this, unless the
   next chunk is at most about 1.5× the previous one's length (since RTF ≈ 0.65), or the
   client buffers a little before playing.
+- **Phase 6 commit 5 (2026-10-07):** `scripts/smoke_test.py` adds a WebSocket group:
+  ready, audio before flush, chunk text and boundary, done, cancel and resume,
+  decimals/abbreviations kept whole, cache hits, bad start → 1008, foreign Origin
+  refused. **32/32 pass.**
+
+  **Phase 6 is functionally done. Still open:**
+  1. The user switches Windows' power mode to **Best performance**.
+  2. Rerun the final benchmark (`bench_latency.py --mode ws --chunking all --wps 5,15,40`)
+     and record it here.
+  3. A valid `OPENAI_API_KEY`, to try the demo with a real LLM.
+  4. The user's listening check: joins, pauses, prosody at cut points.
+
 - **Phase 6 commit 4d (2026-10-07): Gradio voice chat demo** (`examples/voice_chat_ui.py`,
   extra `demo`, ffmpeg needed).
   - **Spike** (headless Chromium via `uv run --with playwright`): Gradio's streaming
