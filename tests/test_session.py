@@ -230,3 +230,37 @@ def test_session_requires_pcm():
     engine = TTSEngine({"fake": provider}, default_provider="fake", default_voice="v1")
     with pytest.raises(ValueError, match="PCM"):
         SpeechSession(engine, provider, "v1", SynthOpts(format="wav"))
+
+
+async def test_text_is_normalized_and_empty_chunks_are_skipped():
+    provider = FakeStreamProvider(chunks=1)
+    session = _session(provider)
+    session.feed("**Hello** there, see https://example.com now.\n\U0001F600\n")
+    session.flush()
+    events = await _collect_until(session, TurnDone)
+    assert provider.started == ["Hello there, see link now."]  # the emoji-only line is gone
+    assert [e for e in events if isinstance(e, SentenceStarted)][0].chars == len(
+        "Hello there, see link now."
+    )
+    await session.close()
+
+
+async def test_normalization_can_be_turned_off():
+    provider = FakeStreamProvider(chunks=1)
+    session = _session(provider, normalize=False)
+    session.feed("**Hello** there.")
+    session.flush()
+    await _collect_until(session, TurnDone)
+    assert provider.started == ["**Hello** there."]
+    await session.close()
+
+
+async def test_decimals_and_abbreviations_are_not_split():
+    provider = FakeStreamProvider(chunks=1)
+    session = _session(provider, fast_start=False)
+    for token in "It takes 3.5 seconds, e.g. on Dr. Smith's laptop. Done.".split(" "):
+        session.feed(token + " ")
+    session.flush()
+    await _collect_until(session, TurnDone)
+    assert provider.started == ["It takes 3.5 seconds, e.g. on Dr. Smith's laptop.", "Done."]
+    await session.close()

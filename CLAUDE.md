@@ -112,10 +112,25 @@ Request flow: **route → `TTSEngine` → provider → (podcast only) audio pipe
   stream sentences and podcast turns share entries. `use_cache=False` (HTTP
   `Cache-Control: no-cache`) skips the lookup but still stores. Wrap provider streams in
   `contextlib.aclosing` so closing early reaches the provider (Kokoro's stop flag).
-- **Chunking**: `SentenceChunker(fast_start=True)` lets the first chunk of a turn end at
-  `,;:` once it's `clause_min_chars` (24) long. It never splits numbers like `1,000`,
-  and waits when a comma is the last character received. `flush()`/`reset()` start a new
-  turn.
+- **Chunking** (`app/core/chunker.py`):
+  - A terminator ends a sentence only when whitespace follows it, so `3.5`,
+    `example.com` and `$4.99` stay whole.
+  - It never ends one after an abbreviation in `_ABBREVIATIONS` (`Dr.`, `e.g.`), after
+    initials (`U.S.`, `J.`), or after a list number at the start of a chunk.
+  - `...` and `?!` count as one terminator, and closers (quotes, brackets, `*_\``) stay
+    on the chunk.
+  - When a terminator or clause break is the last character received, it **waits** for
+    the next one, so streaming token by token gives exactly the same chunks as the whole
+    text. `test_streaming_token_by_token_matches_the_whole_text` enforces this; keep it
+    green when changing rules.
+  - No chunk exceeds `max_length`, whichever way it ends.
+  - `fast_start=True` lets a turn's first chunk end at `,;:` (followed by whitespace)
+    once it's 24+ chars. `flush()`/`reset()` start a new turn.
+- **Text normalization** (`app/core/textnorm.py`): `normalize_for_speech` strips
+  markdown, turns URLs into "link" and drops emoji. It runs on each chunk *after*
+  chunking (whole text, so it is safe when streaming), and an empty result is skipped.
+  It is on by default for WebSocket sessions and opt-in (`normalize`) on the HTTP
+  stream.
 - **Logging** (`app/logging_setup.py`): the `app.*` and `openai` loggers, with a request id
   from a contextvar set by the middleware in `app/main.py`. Log text lengths, never text.
 - **Podcast** (`app/core/podcast.py`): `parse_script` accepts a `turns` list, a JSON string,

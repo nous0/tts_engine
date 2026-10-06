@@ -16,6 +16,7 @@ from .cache import FileCache
 from .chunker import split_sentences
 from .providers._audio import wav_stream_header
 from .providers.base import SynthOpts, TTSProvider, Voice
+from .textnorm import normalize_for_speech
 
 log = logging.getLogger("app.engine")
 
@@ -245,6 +246,7 @@ class TTSEngine:
         max_sentence_length: int = 200,
         fast_start: bool = False,
         use_cache: bool = True,
+        normalize: bool = False,
     ) -> AsyncIterator[bytes]:
         """Stream audio by synthesizing the text sentence-by-sentence.
 
@@ -261,7 +263,8 @@ class TTSEngine:
 
         PCM/WAV sentences go through the per-sentence cache (``open_sentence``);
         compressed formats are streamed straight from the provider. ``fast_start`` lets
-        the first chunk end at a comma for earlier first audio.
+        the first chunk end at a comma for earlier first audio. ``normalize`` strips
+        markdown, links and emoji from each chunk (``app/core/textnorm.py``).
         """
         p = self.get_provider(provider)
         eff_voice = await self.resolve_voice(p, voice)
@@ -278,6 +281,10 @@ class TTSEngine:
         for sentence in split_sentences(
             text, max_length=max_sentence_length, fast_start=fast_start
         ):
+            if normalize:
+                sentence = normalize_for_speech(sentence)
+                if not sentence:
+                    continue
             if raw_pcm:
                 source = (
                     await self.open_sentence(p, eff_voice, provider_opts, sentence, use_cache)

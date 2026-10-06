@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import random
+
 import pytest
 
 from app.core.chunker import (
@@ -21,19 +23,21 @@ def test_single_sentence_stays_buffered_until_flush():
 def test_flushes_on_period():
     chunker = SentenceChunker()
     out = chunker.feed("Hello world. How are you?")
-    assert out == ["Hello world.", "How are you?"]
+    # The last "?" could still be followed by more text, so it waits for the flush.
+    assert out == ["Hello world."]
+    assert chunker.flush() == "How are you?"
     assert chunker.flush() is None
 
 
 def test_keeps_terminator_and_trailing_quotes():
     chunker = SentenceChunker()
-    out = chunker.feed('She said "hi." Then left.')
+    out = chunker.feed('She said "hi." Then left. ')
     assert out == ['She said "hi."', "Then left."]
 
 
 def test_flushes_on_question_and_exclamation():
     chunker = SentenceChunker()
-    out = chunker.feed("Really? Yes! OK.")
+    out = chunker.feed("Really? Yes! OK. ")
     assert out == ["Really?", "Yes!", "OK."]
 
 
@@ -93,7 +97,7 @@ def test_invalid_max_length_raises():
 
 
 def test_split_sentences_helper():
-    assert split_sentences("A. B. C.") == ["A.", "B.", "C."]
+    assert split_sentences("One. Two. Three.") == ["One.", "Two.", "Three."]
     assert split_sentences("No terminator here") == ["No terminator here"]
 
 
@@ -167,7 +171,8 @@ def test_fast_start_waits_to_see_what_follows_a_streamed_comma():
     assert chunker.feed("The total price comes to 1") == []
     assert chunker.feed(",") == []  # could be "1,000": wait for the next token
     assert chunker.feed("000 dollars, which") == ["The total price comes to 1,000 dollars,"]
-    assert chunker.feed(" is fine.") == ["which is fine."]
+    assert chunker.feed(" is fine.") == []  # waits: "fine." might be "fine.com"
+    assert chunker.feed(" Ok") == ["which is fine."]
 
 
 def test_flush_and_reset_start_a_new_fast_start_turn():
@@ -179,3 +184,99 @@ def test_flush_and_reset_start_a_new_fast_start_turn():
     chunker.reset()
     assert chunker.pending == ""
     assert chunker.feed(first_turn) == ["Here is a first clause long enough,"]
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("The latency is 3.5 seconds on average.", ["The latency is 3.5 seconds on average."]),
+        ("It costs $4.99 per month.", ["It costs $4.99 per month."]),
+        ("See example.com for details. Thanks!", ["See example.com for details.", "Thanks!"]),
+        ("Dr. Smith met Mr. Jones.", ["Dr. Smith met Mr. Jones."]),
+        ("We met in the U.S. last week.", ["We met in the U.S. last week."]),
+        ("Use a tool, e.g. a hammer. Done.", ["Use a tool, e.g. a hammer.", "Done."]),
+        ("J. K. Rowling wrote it.", ["J. K. Rowling wrote it."]),
+        ("Wait... really? Yes.", ["Wait...", "really?", "Yes."]),
+        ("Really?! No way.", ["Really?!", "No way."]),
+        ('He said "stop." Then left.', ['He said "stop."', "Then left."]),
+        ("**Note.** This matters.", ["**Note.**", "This matters."]),
+        ("1. First item\n2. Second item", ["1. First item", "2. Second item"]),
+        ("I counted to 3. Then I stopped.", ["I counted to 3.", "Then I stopped."]),
+        ("Line one. Line two.\nNext line", ["Line one.", "Line two.", "Next line"]),
+        ("We open at 9 a.m. every day.", ["We open at 9 a.m. every day."]),
+        ("It ends here … then more.", ["It ends here …", "then more."]),
+    ],
+)
+def test_sentence_boundaries(text, expected):
+    assert split_sentences(text) == expected
+
+
+def test_a_terminator_at_the_end_waits_for_the_next_character():
+    chunker = SentenceChunker()
+    assert chunker.feed("It is 3.") == []  # could become 3.5
+    assert chunker.feed("5 seconds.") == []
+    assert chunker.feed(" Next") == ["It is 3.5 seconds."]
+
+
+def test_long_sentences_split_the_same_way_streamed_or_whole():
+    text = "word " * 60 + "end."
+    whole = split_sentences(text, max_length=50)
+    assert all(len(chunk) <= 50 for chunk in whole)
+    chunker = SentenceChunker(max_length=50)
+    streamed = []
+    for word in text.split(" "):
+        streamed += chunker.feed(word + " ")
+    tail = chunker.flush()
+    streamed += [tail] if tail else []
+    assert streamed == whole
+
+
+# Text that exercises every rule: decimals, abbreviations, initials, URLs, ellipses,
+# quotes, markdown, lists, newlines, numbers with commas, long sentences.
+INVARIANT_CORPUS = [
+    "Hello! How are you today? I'm fine, thanks.",
+    "The latency is 3.5 seconds, which is fine. Next we test 1,000 requests.",
+    "Dr. Smith met Mr. Jones in the U.S. last week. They talked for 2.5 hours.",
+    "See example.com or https://docs.example.org/a?b=1 for details. Thanks!",
+    "Wait... really?! Yes. \"Quoted.\" (Parenthetical.) Done",
+    "**Bold.** _Italic._ `code.` Then plain text follows here.",
+    "1. First item\n2. Second item\n- bullet one\n- bullet two",
+    "Use a tool, e.g. a hammer, i.e. something heavy. Then stop.",
+    "When you think about how speech synthesis has changed over the last few years, "
+    "the biggest shift is direct audio generation. That sounds natural.",
+    "It costs $4.99 per month at 10:30 a.m. every day, approx. forever.",
+    "One. Two. Three. Four. Five. Six. Seven. Eight. Nine. Ten.",
+    "A sentence without any terminator at all but quite long nonetheless and it keeps "
+    "going on and on and on without stopping for a very long time indeed my friend",
+    "Short. " * 10 + "A final longer sentence that wraps it all up nicely.",
+    "Line one\n\nLine two after a blank line.\r\nWindows line three.",
+    "Numbers like 1,000,000 and 3.14159 and 2.0, plus times like 12:45, stay whole.",
+    "J. K. Rowling and George R. R. Martin wrote books. Both sold well.",
+    "What?! No... I mean, yes. Okay?",
+    "Emoji \U0001F389 and symbols ❤ sit inside text. Then a sentence.",
+    "He said \"stop.\" She said 'go!' They left.",
+    "Mixed: first clause, second clause; third clause: and the end.",
+]
+
+
+@pytest.mark.parametrize("fast_start", [False, True])
+@pytest.mark.parametrize("index", range(len(INVARIANT_CORPUS)))
+def test_streaming_token_by_token_matches_the_whole_text(index, fast_start):
+    text = INVARIANT_CORPUS[index]
+    expected = split_sentences(text, max_length=80, fast_start=fast_start)
+    # Nothing is lost or duplicated: the chunks hold exactly the original words.
+    assert " ".join(expected).split() == text.split()
+
+    rng = random.Random(index)
+    for _ in range(50):
+        chunker = SentenceChunker(max_length=80, fast_start=fast_start)
+        streamed: list[str] = []
+        pos = 0
+        while pos < len(text):
+            size = rng.randint(1, 8)
+            streamed += chunker.feed(text[pos : pos + size])
+            pos += size
+        tail = chunker.flush()
+        if tail:
+            streamed.append(tail)
+        assert streamed == expected, f"token split changed the chunks for {text!r}"

@@ -113,6 +113,7 @@ async def create_speech_stream(
         max_sentence_length=req.max_sentence_length,
         fast_start=req.fast_start,
         use_cache=_use_cache(request),
+        normalize=req.normalize,
     )
     # Wait for the first audio chunk before sending headers, so the most common
     # failures (bad voice or format, provider down or timing out) still get a real

@@ -35,6 +35,7 @@ from dataclasses import dataclass
 from .chunker import SentenceChunker
 from .engine import InvalidRequest, TTSEngine
 from .providers.base import SynthOpts, TTSProvider
+from .textnorm import normalize_for_speech
 
 log = logging.getLogger("app.session")
 
@@ -100,6 +101,7 @@ class SpeechSession:
         *,
         fast_start: bool = True,
         use_cache: bool = True,
+        normalize: bool = True,
         max_turn_chars: int = 10_000,
         max_sentence_length: int = 200,
     ) -> None:
@@ -110,6 +112,7 @@ class SpeechSession:
         self._voice = voice
         self._opts = opts
         self._use_cache = use_cache
+        self._normalize = normalize
         self._max_turn_chars = max_turn_chars
         self._chunker = SentenceChunker(max_length=max_sentence_length, fast_start=fast_start)
 
@@ -187,6 +190,10 @@ class SpeechSession:
     # --- internals ---------------------------------------------------------------
 
     def _queue_sentence(self, text: str) -> None:
+        if self._normalize:
+            text = normalize_for_speech(text)
+            if not text:
+                return  # e.g. a chunk that was only markdown or emoji
         self._work.put_nowait(_Sentence(self._generation, self._turn, text))
 
     def _next_turn(self) -> None:

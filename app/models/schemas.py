@@ -46,6 +46,9 @@ class SpeechStreamRequest(BaseModel):
         description="Let the first chunk end at a comma once it's 24+ chars, so audio "
         "starts sooner (the first sentence may sound slightly split).",
     )
+    normalize: bool = Field(
+        False, description="Strip markdown, links and emoji before speaking (chatbot text)."
+    )
 
 
 class PodcastTurn(BaseModel):
@@ -147,4 +150,7 @@ class WsStart(BaseModel):
         True, description="Let each turn's first chunk end at a comma for earlier audio."
     )
     cache: bool = Field(True, description="Serve cached sentences; false always synthesizes.")
+    normalize: bool = Field(
+        True, description="Strip markdown, links and emoji from the text before speaking."
+    )
     max_sentence_length: int = Field(200, ge=20, le=2000)

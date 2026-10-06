@@ -103,6 +103,12 @@ Last checked: 2026-09-29.
   to make. Splitting chunks smaller lowers TTFA but can add stalls like this, unless the
   next chunk is at most about 1.5× the previous one's length (since RTF ≈ 0.65), or the
   client buffers a little before playing.
+- **Phase 6 commit 4a (2026-10-06): sentence splitting fixed.** It used to split
+  `3.5`, `$4.99`, `example.com`, `Dr.`, `U.S.`, `e.g.` and `...` (read aloud as
+  "three. five"). It also merged sentences before a newline, cut long sentences
+  differently streamed vs whole, and with `fast_start` cut inside `https://`. A
+  randomized token-split invariant test now guarantees the same chunks either way.
+  Added `textnorm` (markdown, links, emoji), on by default for WebSocket.
 - **After Phase 6 commit 3: WebSocket `/v1/speech/ws` works end to end with Kokoro**
   (`examples/ws_client.py`, 15 words/s fake LLM). Measured from the first sentence
   being fully sent to its first audio:

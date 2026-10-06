@@ -112,6 +112,12 @@ any time (barge-in).
 - `fast_start` is on by default here: each turn's first chunk may end at a comma, so audio
   starts sooner. Sentences are cached like `/v1/speech/stream` (`"cache": false` to
   skip).
+- `normalize` is on by default here: markdown, links and emoji in LLM output are removed
+  before speaking (`**bold**` → "bold", a URL → "link"). The HTTP stream has the same
+  `normalize` field, off by default.
+- Sentence splitting understands decimals (`3.5`), prices (`$4.99`), domains
+  (`example.com`), abbreviations (`Dr.`, `e.g.`), initials (`U.S.`) and ellipses, so
+  none of them break a sentence in two.
 - Browser clients (which send an `Origin` header) are refused unless the origin is listed
   in `WS_ALLOWED_ORIGINS`. Server-side clients are always allowed. A turn is capped at
   `WS_MAX_TURN_CHARS` (default 10 000).

@@ -318,3 +318,14 @@ def test_stream_endpoint_fast_start_splits_the_first_sentence(tmp_path):
     assert fast.content == (
         b"<Here is a first clause that is long enough,><and then the rest.><Done.>"
     )
+
+
+def test_stream_endpoint_can_normalize_chatbot_text(tmp_path):
+    with TestClient(app) as client:
+        app.state.engine, provider = _streaming_engine(tmp_path)
+        plain = client.post("/v1/speech/stream",
+                            json={"text": "**Hi** there.", "format": "pcm"})
+        clean = client.post("/v1/speech/stream",
+                            json={"text": "**Hi** there.", "format": "pcm", "normalize": True})
+    assert plain.content == b"<**Hi** there.>"  # off by default for the HTTP stream
+    assert clean.content == b"<Hi there.>"
