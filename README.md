@@ -115,6 +115,11 @@ any time (barge-in).
 - `normalize` is on by default here: markdown, links and emoji in LLM output are removed
   before speaking (`**bold**` → "bold", a URL → "link"). The HTTP stream has the same
   `normalize` field, off by default.
+- Chunks are joined smoothly: each chunk's leading and trailing silence (about 0.8 s
+  with Kokoro) is trimmed, and a natural pause is inserted for how it ended (sentence
+  300 ms, comma 150 ms, line 450 ms). The same applies to pcm/wav on the HTTP stream;
+  turn it off with `STREAM_SHAPE_AUDIO=false`. The `sentence` event also carries the
+  spoken `text` and its `boundary` (`sentence`, `clause`, `line`, `word` or `end`).
 - Sentence splitting understands decimals (`3.5`), prices (`$4.99`), domains
   (`example.com`), abbreviations (`Dr.`, `e.g.`), initials (`U.S.`) and ellipses, so
   none of them break a sentence in two.
@@ -248,6 +253,7 @@ uv run uvicorn app.main:app --port 8000          # terminal 1
 uv run python scripts/smoke_test.py              # terminal 2: 22 checks, about 1 minute
 uv run python scripts/smoke_test.py --skip-jobs  # without the job queue/cancel checks
 uv run python scripts/bench_latency.py           # streaming latency: TTFA, RTF, stalls
+uv run python scripts/bench_latency.py --mode ws --chunking all --wps 5,15,40   # chatbot view
 
 # Restart recovery (two steps, with a server restart in between):
 uv run python scripts/smoke_test.py --leave-running-job

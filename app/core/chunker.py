@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import AsyncIterator, Iterable
+from typing import Literal, NamedTuple
 
 # Characters that end a sentence. The terminator is kept on the flushed chunk.
 _TERMINATORS = ".!?\u2026"
@@ -41,6 +42,14 @@ _ABBREVIATIONS = frozenset(
 _INITIALS = re.compile(r"^(?:[A-Za-z]\.)*[A-Za-z]$")
 # Returned by _sentence_end when the next character decides.
 _WAIT = "wait"
+
+# How a chunk ended; decides the pause after it when chunks are joined.
+Boundary = Literal["sentence", "clause", "line", "word", "end"]
+
+
+class Chunk(NamedTuple):
+    text: str
+    boundary: Boundary  # sentence end, clause break, newline, length cut, or end of turn
 
 
 class SentenceChunker:
@@ -75,13 +84,17 @@ class SentenceChunker:
 
     def feed(self, text: str) -> list[str]:
         """Append ``text`` to the buffer and return any complete chunks."""
+        return [chunk.text for chunk in self.feed_chunks(text)]
+
+    def feed_chunks(self, text: str) -> list[Chunk]:
+        """Like ``feed``, also saying how each chunk ended."""
         out = self._feed(text)
         if out:
             self._emitted = True
         return out
 
-    def _feed(self, text: str) -> list[str]:
-        out: list[str] = []
+    def _feed(self, text: str) -> list[Chunk]:
+        out: list[Chunk] = []
         self._buffer += text
 
         while True:
@@ -111,7 +124,7 @@ class SentenceChunker:
                 space_idx = buf.rfind(" ", 0, cut)
                 if space_idx > 0:
                     cut = space_idx
-                out.append(buf[:cut].rstrip())
+                out.append(Chunk(buf[:cut].rstrip(), "word"))
                 self._buffer = buf[cut:].lstrip()
                 continue
 
@@ -120,14 +133,14 @@ class SentenceChunker:
             if self._fast_start and not self._emitted and not out:
                 clause_idx = self._first_clause_break()
                 if clause_idx != -1 and (first_cut is None or clause_idx < first_cut):
-                    out.append(buf[: clause_idx + 1])
+                    out.append(Chunk(buf[: clause_idx + 1], "clause"))
                     self._buffer = buf[clause_idx + 1 :]
                     continue
 
             # 2) A sentence end before any newline.
             if isinstance(end, tuple):
                 cut, resume = end
-                out.append(buf[:cut])
+                out.append(Chunk(buf[:cut], "sentence"))
                 self._buffer = buf[resume:]
                 continue
 
@@ -139,7 +152,7 @@ class SentenceChunker:
                     rest += 1
                 self._buffer = buf[rest:]
                 if chunk:
-                    out.append(chunk)
+                    out.append(Chunk(chunk, "line"))
                 continue
 
             # A terminator is the last thing received (end is _WAIT), or there is no
@@ -151,9 +164,14 @@ class SentenceChunker:
 
         The next text starts a new turn (which fast-starts again).
         """
+        chunk = self.flush_chunk()
+        return chunk.text if chunk else None
+
+    def flush_chunk(self) -> Chunk | None:
+        """Like ``flush``; the tail's boundary is ``"end"``."""
         tail = self._buffer.strip()
         self.reset()
-        return tail or None
+        return Chunk(tail, "end") if tail else None
 
     def reset(self) -> None:
         """Drop buffered text and start a new turn (e.g. when speech is cancelled)."""
@@ -187,9 +205,14 @@ class SentenceChunker:
 
 def split_sentences(text: str, max_length: int = 200, fast_start: bool = False) -> list[str]:
     """Split a complete ``text`` into sentence-ish chunks (stateless helper)."""
+    return [chunk.text for chunk in split_chunks(text, max_length, fast_start)]
+
+
+def split_chunks(text: str, max_length: int = 200, fast_start: bool = False) -> list[Chunk]:
+    """Like ``split_sentences``, also saying how each chunk ended."""
     chunker = SentenceChunker(max_length=max_length, fast_start=fast_start)
-    chunks = chunker.feed(text)
-    tail = chunker.flush()
+    chunks = chunker.feed_chunks(text)
+    tail = chunker.flush_chunk()
     if tail:
         chunks.append(tail)
     return chunks

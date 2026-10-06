@@ -46,6 +46,10 @@ class Settings(BaseSettings):
     cache_dir: str = "./output/cache"
     cache_max_mb: int = Field(512, ge=0)
 
+    # Streamed PCM (HTTP stream + WebSocket): trim each chunk's edge silence and insert a
+    # natural pause for how it ended, so chunks join like continuous speech.
+    stream_shape_audio: bool = True
+
     # WebSocket /v1/speech/ws
     # Browser origins allowed to connect (comma-separated, e.g. "http://localhost:7860").
     # Connections without an Origin header (server-side clients) are always allowed.

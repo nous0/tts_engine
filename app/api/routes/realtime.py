@@ -13,7 +13,9 @@ client -> server
 server -> client
     {"type": "ready", "sample_rate": 24000, "channels": 1, "sample_width": 2,
      "format": "pcm", "provider", "voice"}
-    {"type": "sentence", "index", "turn", "chars", "cached"}   before each sentence's audio
+    {"type": "sentence", "index", "turn", "chars", "cached", "text", "boundary"}
+                                        before each chunk's audio; boundary is how it
+                                        ended: sentence|clause|line|word|end
     <binary>                            raw PCM, s16le mono at sample_rate
     {"type": "done", "turn"}            the turn's last audio has been sent
     {"type": "cancelled"}               after a cancel; all pending turns are dropped
@@ -207,6 +209,8 @@ async def _forward_events(
                         "turn": event.turn,
                         "chars": event.chars,
                         "cached": event.cached,
+                        "text": event.text,
+                        "boundary": event.boundary,
                     }
                 )
             elif isinstance(event, TurnDone):

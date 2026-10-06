@@ -33,7 +33,7 @@ from contextlib import aclosing
 from dataclasses import dataclass
 
 from .chunker import SentenceChunker
-from .engine import InvalidRequest, TTSEngine
+from .engine import InvalidRequest, TTSEngine, shape_chunk
 from .providers.base import SynthOpts, TTSProvider
 from .textnorm import normalize_for_speech
 
@@ -49,6 +49,8 @@ class SentenceStarted:
     turn: int
     chars: int
     cached: bool
+    text: str = ""  # what is being spoken (after normalization)
+    boundary: str = "sentence"  # how the chunk ended: sentence|clause|line|word|end
 
 
 @dataclass(slots=True)
@@ -83,6 +85,7 @@ class _Sentence:
     generation: int
     turn: int
     text: str
+    boundary: str = "sentence"
 
 
 @dataclass(slots=True)
@@ -102,6 +105,7 @@ class SpeechSession:
         fast_start: bool = True,
         use_cache: bool = True,
         normalize: bool = True,
+        shape_audio: bool | None = None,
         max_turn_chars: int = 10_000,
         max_sentence_length: int = 200,
     ) -> None:
@@ -113,6 +117,7 @@ class SpeechSession:
         self._opts = opts
         self._use_cache = use_cache
         self._normalize = normalize
+        self._shape_audio = engine.shape_audio if shape_audio is None else shape_audio
         self._max_turn_chars = max_turn_chars
         self._chunker = SentenceChunker(max_length=max_sentence_length, fast_start=fast_start)
 
@@ -153,14 +158,14 @@ class SpeechSession:
                 f"to end it and start a new one."
             )
         self._turn_chars += len(text)
-        for sentence in self._chunker.feed(text):
-            self._queue_sentence(sentence)
+        for chunk in self._chunker.feed_chunks(text):
+            self._queue_sentence(chunk.text, chunk.boundary)
 
     def flush(self) -> int:
         """End the current turn; returns its number."""
-        tail = self._chunker.flush()
+        tail = self._chunker.flush_chunk()
         if tail:
-            self._queue_sentence(tail)
+            self._queue_sentence(tail.text, tail.boundary)
         turn = self._turn
         self._work.put_nowait(_TurnEnd(self._generation, turn))
         self._next_turn()
@@ -189,12 +194,12 @@ class SpeechSession:
 
     # --- internals ---------------------------------------------------------------
 
-    def _queue_sentence(self, text: str) -> None:
+    def _queue_sentence(self, text: str, boundary: str = "sentence") -> None:
         if self._normalize:
             text = normalize_for_speech(text)
             if not text:
                 return  # e.g. a chunk that was only markdown or emoji
-        self._work.put_nowait(_Sentence(self._generation, self._turn, text))
+        self._work.put_nowait(_Sentence(self._generation, self._turn, text, boundary))
 
     def _next_turn(self) -> None:
         self._turn += 1
@@ -230,10 +235,20 @@ class SpeechSession:
             self._provider, self._voice, self._opts, item.text, self._use_cache
         )
         self._events.put_nowait(
-            SentenceStarted(self._sentence_index, item.turn, len(item.text), audio.cached)
+            SentenceStarted(
+                self._sentence_index,
+                item.turn,
+                len(item.text),
+                audio.cached,
+                item.text,
+                item.boundary,
+            )
         )
         self._sentence_index += 1
-        async with aclosing(audio.chunks) as chunks:
+        source = audio.chunks
+        if self._shape_audio:
+            source = shape_chunk(source, item.boundary)  # trims edges, adds the pause
+        async with aclosing(source) as chunks:
             async for pcm in chunks:
                 self._events.put_nowait(Audio(pcm))
 

@@ -38,6 +38,7 @@ async def lifespan(app: FastAPI):
         default_provider=settings.default_provider,
         default_voice=settings.default_voice,
         cache=cache,
+        shape_audio=settings.stream_shape_audio,
     )
     app.state.engine = engine
 

@@ -12,8 +12,9 @@ from collections.abc import AsyncIterator
 from contextlib import aclosing
 from dataclasses import dataclass, replace
 
+from . import audio as audio_ops
 from .cache import FileCache
-from .chunker import split_sentences
+from .chunker import Boundary, split_chunks
 from .providers._audio import wav_stream_header
 from .providers.base import SynthOpts, TTSProvider, Voice
 from .textnorm import normalize_for_speech
@@ -65,11 +66,22 @@ class TTSEngine:
         default_provider: str,
         default_voice: str,
         cache: FileCache | None = None,
+        shape_audio: bool = False,
     ) -> None:
         self._providers = providers
         self._default_provider = default_provider
         self._default_voice = default_voice
         self._cache = cache
+        self._shape_audio = shape_audio
+
+    @property
+    def shape_audio(self) -> bool:
+        """Whether streamed PCM is joined smoothly (edge silence trimmed, pauses added).
+
+        Off by default so unit tests see provider bytes untouched; the app turns it on
+        (``STREAM_SHAPE_AUDIO``).
+        """
+        return self._shape_audio
 
     @property
     def default_provider(self) -> str:
@@ -261,8 +273,9 @@ class TTSEngine:
         as a click. Nothing is yielded until the provider produces real audio, so a
         caller can wait for the first chunk to catch early failures.
 
-        PCM/WAV sentences go through the per-sentence cache (``open_sentence``);
-        compressed formats are streamed straight from the provider. ``fast_start`` lets
+        PCM/WAV sentences go through the per-sentence cache (``open_sentence``) and,
+        with ``shape_audio``, are joined smoothly (``shape_chunk``); compressed formats are
+        streamed straight from the provider. ``fast_start`` lets
         the first chunk end at a comma for earlier first audio. ``normalize`` strips
         markdown, links and emoji from each chunk (``app/core/textnorm.py``).
         """
@@ -278,17 +291,21 @@ class TTSEngine:
         raw_pcm = wav or eff_opts.format == "pcm"
         provider_opts = replace(eff_opts, format="pcm") if wav else eff_opts
         header_sent = False
-        for sentence in split_sentences(
-            text, max_length=max_sentence_length, fast_start=fast_start
-        ):
-            if normalize:
-                sentence = normalize_for_speech(sentence)
-                if not sentence:
-                    continue
+        pieces = split_chunks(text, max_length=max_sentence_length, fast_start=fast_start)
+        if normalize:
+            pieces = [
+                piece._replace(text=normalize_for_speech(piece.text)) for piece in pieces
+            ]
+            pieces = [piece for piece in pieces if piece.text]
+        for index, piece in enumerate(pieces):
+            sentence = piece.text
             if raw_pcm:
                 source = (
                     await self.open_sentence(p, eff_voice, provider_opts, sentence, use_cache)
                 ).chunks
+                if self._shape_audio:
+                    last = index == len(pieces) - 1
+                    source = shape_chunk(source, "end" if last else piece.boundary)
             else:
                 source = p.synthesize_stream(sentence, eff_voice, provider_opts)
             async with aclosing(source) as chunks:
@@ -311,3 +328,21 @@ def _cache_tag(provider: TTSProvider, opts: SynthOpts) -> str:
 
 async def _single(data: bytes) -> AsyncIterator[bytes]:
     yield data
+
+
+async def shape_chunk(chunks: AsyncIterator[bytes], boundary: Boundary) -> AsyncIterator[bytes]:
+    """One chunk's PCM with its edge silence trimmed and a pause for ``boundary`` added.
+
+    Trimming doesn't delay speech (``audio.EdgeTrimmer``); the pause after the chunk
+    depends on how it ended (``audio.PAUSE_AFTER_MS``), so joined chunks sound like
+    continuous speech instead of separate clips. Closing this closes ``chunks``.
+    """
+    trimmer = audio_ops.EdgeTrimmer()
+    async with aclosing(chunks) as source:
+        async for pcm in source:
+            out = trimmer.push(pcm)
+            if out:
+                yield out
+    tail = trimmer.finish() + audio_ops.silence(audio_ops.PAUSE_AFTER_MS.get(boundary, 0))
+    if tail:
+        yield tail

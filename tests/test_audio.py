@@ -147,3 +147,104 @@ def test_wav_to_pcm_rejects_mismatched_format():
         wf.writeframes(b"\x00\x00" * 100)
     with pytest.raises(audio.AudioError):
         audio.wav_to_pcm(buf.getvalue())
+
+
+# --- joining streamed chunks -------------------------------------------------------
+
+
+def _padded(speech_ms: int = 400, lead_ms: int = 300, tail_ms: int = 500) -> bytes:
+    """Speech with silence around it, like a Kokoro chunk."""
+    return audio.silence(lead_ms) + tone(speech_ms) + audio.silence(tail_ms)
+
+
+def _trim(pcm: bytes, piece: int | None = None) -> bytes:
+    trimmer = audio.EdgeTrimmer()
+    if piece is None:
+        return trimmer.push(pcm) + trimmer.finish()
+    out = b"".join(trimmer.push(pcm[i : i + piece]) for i in range(0, len(pcm), piece))
+    return out + trimmer.finish()
+
+
+def test_edge_trimmer_drops_padding_but_keeps_a_margin():
+    out = _trim(_padded())
+    # 400 ms of speech plus at most ~30 ms of margin on each side.
+    assert 400 <= audio.duration_ms(out) <= 400 + 2 * audio.EDGE_KEEP_MS + 1
+
+
+def test_edge_trimmer_gives_the_same_audio_however_it_is_streamed():
+    whole = _trim(_padded())
+    for piece in (1, 7, 333, 4800):  # odd sizes split samples in half
+        assert _trim(_padded(), piece) == whole
+
+
+def test_edge_trimmer_keeps_pauses_inside_the_chunk():
+    inner = tone(300) + audio.silence(400) + tone(300)
+    out = _trim(audio.silence(200) + inner + audio.silence(200))
+    assert audio.duration_ms(out) >= audio.duration_ms(inner)
+
+
+def test_edge_trimmer_never_delays_speech():
+    trimmer = audio.EdgeTrimmer()
+    assert trimmer.push(audio.silence(300)) == b""  # leading silence: nothing yet
+    out = trimmer.push(tone(200))
+    assert audio.duration_ms(out) >= 190  # the speech goes out as soon as it arrives
+
+
+def test_edge_trimmer_fades_the_new_edges():
+    out = _trim(audio.silence(100) + tone(200, amplitude=20000) + audio.silence(100))
+    samples = array.array("h")
+    samples.frombytes(out)
+    assert abs(samples[0]) < 200 and abs(samples[-1]) < 200
+
+
+def test_a_silent_chunk_trims_to_nothing():
+    assert _trim(audio.silence(500)) == b""
+
+
+class PaddedPcmProvider:
+    """Streams each chunk as padded speech, in two pieces, like a real provider."""
+
+    name = "padded"
+
+    async def synthesize(self, text, voice, opts):
+        return _padded()
+
+    async def synthesize_stream(self, text, voice, opts):
+        pcm = _padded()
+        yield pcm[: len(pcm) // 3]
+        yield pcm[len(pcm) // 3 :]
+
+    async def list_voices(self):
+        from app.core.providers.base import Voice
+
+        return [Voice(id="v1", name="v1", provider=self.name)]
+
+
+async def _stream(text: str, shape: bool, fmt: str = "pcm") -> bytes:
+    from app.core.engine import TTSEngine
+    from app.core.providers.base import SynthOpts
+
+    engine = TTSEngine({"padded": PaddedPcmProvider()}, default_provider="padded",
+                       default_voice="v1", shape_audio=shape)
+    return b"".join(
+        [c async for c in engine.synthesize_stream(text, opts=SynthOpts(format=fmt))]
+    )
+
+
+async def test_shaped_stream_replaces_padding_with_boundary_pauses():
+    text = "One. Two, three is here\nFour"
+    raw = await _stream(text, shape=False)
+    assert raw == _padded() * 3  # off: provider audio passes through untouched
+
+    # Chunks: "One." (sentence), "Two, three is here" (line), "Four" (end: no pause).
+    shaped = await _stream(text, shape=True)
+    speech = 3 * 400
+    pauses = audio.PAUSE_AFTER_MS["sentence"] + audio.PAUSE_AFTER_MS["line"]
+    margins = 3 * 2 * audio.EDGE_KEEP_MS
+    assert speech + pauses <= audio.duration_ms(shaped) <= speech + pauses + margins + 5
+    assert audio.duration_ms(shaped) < audio.duration_ms(raw)  # less dead air
+
+
+async def test_shaped_wav_stream_still_has_one_header():
+    body = await _stream("One. Two.", shape=True, fmt="wav")
+    assert body.count(b"RIFF") == 1

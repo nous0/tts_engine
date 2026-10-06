@@ -97,10 +97,10 @@ async def test_flush_speaks_the_rest_and_ends_the_turn():
     assert session.flush() == 0
     events = await _collect_until(session, TurnDone)
     assert events == [
-        SentenceStarted(0, 0, len("Hello there."), False),
+        SentenceStarted(0, 0, len("Hello there."), False, "Hello there.", "sentence"),
         Audio(b"Hello there.#0"),
         Audio(b"Hello there.#1"),
-        SentenceStarted(1, 0, len("How are you"), False),
+        SentenceStarted(1, 0, len("How are you"), False, "How are you", "end"),
         Audio(b"How are you#0"),
         Audio(b"How are you#1"),
         TurnDone(0),
@@ -263,4 +263,26 @@ async def test_decimals_and_abbreviations_are_not_split():
     session.flush()
     await _collect_until(session, TurnDone)
     assert provider.started == ["It takes 3.5 seconds, e.g. on Dr. Smith's laptop.", "Done."]
+    await session.close()
+
+
+async def test_shaped_session_trims_padding_and_adds_boundary_pauses():
+    from app.core import audio
+    from tests.test_audio import PaddedPcmProvider
+
+    provider = PaddedPcmProvider()
+    engine = TTSEngine({"padded": provider}, default_provider="padded", default_voice="v1",
+                       shape_audio=True)
+    session = SpeechSession(engine, provider, "v1", PCM, fast_start=False)
+    assert session._shape_audio is True  # follows the engine by default
+    session.start()
+    session.feed("One. Two.")
+    session.flush()
+    events = await _collect_until(session, TurnDone)
+    pcm = b"".join(e.pcm for e in events if isinstance(e, Audio))
+    # "One." ends a sentence (300 ms pause); "Two." ends the turn (no pause).
+    expected = 2 * 400 + audio.PAUSE_AFTER_MS["sentence"]
+    assert expected <= audio.duration_ms(pcm) <= expected + 4 * audio.EDGE_KEEP_MS + 5
+    boundaries = [e.boundary for e in events if isinstance(e, SentenceStarted)]
+    assert boundaries == ["sentence", "end"]
     await session.close()

@@ -29,8 +29,10 @@ from .providers._audio import (
 )
 
 __all__ = [
+    "PAUSE_AFTER_MS",
     "AudioError",
     "CHANNELS",
+    "EdgeTrimmer",
     "HAS_FFMPEG",
     "NATIVE_FORMATS",
     "SAMPLE_RATE",
@@ -52,6 +54,16 @@ BYTES_PER_FRAME = CHANNELS * SAMPLE_WIDTH
 
 # Headroom left by the default normalization pass, in dB below full scale.
 DEFAULT_TARGET_DBFS = -1.0
+
+# Joining streamed chunks: samples quieter than this count as silence (about -44 dBFS).
+EDGE_THRESHOLD = 200
+EDGE_KEEP_MS = 30  # silence kept next to speech, so soft onsets/endings survive
+EDGE_FADE_MS = 5  # ramp at the new edges, so a cut never clicks
+
+# Pause inserted after a streamed chunk, by how it ended (see chunker.Boundary).
+# Kokoro pads every chunk with ~0.3 s of silence in front and ~0.5 s behind; trimming
+# that and adding these instead gives natural gaps instead of ~0.8 s of dead air.
+PAUSE_AFTER_MS = {"sentence": 300, "clause": 150, "line": 450, "word": 40, "end": 0}
 
 
 class AudioError(Exception):
@@ -193,6 +205,100 @@ def to_pcm(data: bytes) -> bytes:
     if data[:4] == b"RIFF" and data[8:12] == b"WAVE":
         return wav_to_pcm(data)
     return data
+
+
+class EdgeTrimmer:
+    """Trim the silence around one streamed chunk without delaying its speech.
+
+    ``push`` audio as it arrives and send what it returns; call ``finish`` at the end of
+    the chunk. Leading silence is dropped (except ``keep_ms`` before the first sound,
+    faded in). Audio is passed on as soon as it contains sound, and only a quiet stretch
+    after the last sound is held back, because it might be the chunk's trailing
+    silence. ``finish`` keeps ``keep_ms`` of it, faded out. Speech is never delayed,
+    even for providers that stream many small pieces (OpenAI).
+    """
+
+    def __init__(
+        self,
+        threshold: int = EDGE_THRESHOLD,
+        keep_ms: int = EDGE_KEEP_MS,
+        fade_ms: int = EDGE_FADE_MS,
+    ) -> None:
+        self._threshold = threshold
+        self._keep = _frames(keep_ms)
+        self._fade = _frames(fade_ms)
+        self._started = False
+        self._held = array("h")  # leading silence before speech, or quiet tail after it
+        self._carry = b""  # half a sample left over from an odd-sized piece
+
+    def push(self, pcm: bytes) -> bytes:
+        data = self._carry + pcm
+        whole = len(data) - len(data) % SAMPLE_WIDTH
+        self._carry = data[whole:]
+        buf = self._held + _samples(data[:whole])
+
+        if not self._started:
+            first = _first_loud(buf, self._threshold)
+            if first is None:
+                self._held = buf[-self._keep :] if self._keep else array("h")
+                return b""
+            buf = buf[max(0, first - self._keep) :]
+            _fade(buf, self._fade, fade_in=True)
+            self._started = True
+
+        last = _last_loud(buf, self._threshold)
+        if last is None:
+            self._held = buf
+            return b""
+        self._held = buf[last + 1 :]
+        return _to_bytes(buf[: last + 1])
+
+    def finish(self) -> bytes:
+        """The rest of the chunk: a short, faded-out bit of its trailing silence."""
+        if not self._started:
+            return b""  # the chunk was silent
+        tail = self._held[: self._keep]
+        self._held = array("h")
+        self._carry = b""
+        _fade(tail, self._fade, fade_in=False)
+        return _to_bytes(tail)
+
+
+def _frames(ms: int) -> int:
+    return max(0, round(SAMPLE_RATE * ms / 1000))
+
+
+def _first_loud(samples: array, threshold: int) -> int | None:
+    np = _numpy()
+    if np is not None and len(samples):
+        hits = np.flatnonzero(np.abs(np.frombuffer(samples, dtype="<i2").astype("int32"))
+                              >= threshold)
+        return int(hits[0]) if hits.size else None
+    for i, s in enumerate(samples):
+        if abs(s) >= threshold:
+            return i
+    return None
+
+
+def _last_loud(samples: array, threshold: int) -> int | None:
+    np = _numpy()
+    if np is not None and len(samples):
+        hits = np.flatnonzero(np.abs(np.frombuffer(samples, dtype="<i2").astype("int32"))
+                              >= threshold)
+        return int(hits[-1]) if hits.size else None
+    for i in range(len(samples) - 1, -1, -1):
+        if abs(samples[i]) >= threshold:
+            return i
+    return None
+
+
+def _fade(samples: array, frames: int, fade_in: bool) -> None:
+    """Linear ramp over the first (fade in) or last (fade out) ``frames`` samples."""
+    n = min(frames, len(samples))
+    for k in range(n):
+        gain = (k + 1) / (n + 1)
+        i = k if fade_in else len(samples) - 1 - k
+        samples[i] = int(samples[i] * gain)
 
 
 def _numpy():

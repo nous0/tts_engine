@@ -126,6 +126,16 @@ Request flow: **route → `TTSEngine` → provider → (podcast only) audio pipe
   - No chunk exceeds `max_length`, whichever way it ends.
   - `fast_start=True` lets a turn's first chunk end at `,;:` (followed by whitespace)
     once it's 24+ chars. `flush()`/`reset()` start a new turn.
+- **Joining streamed chunks** (`engine.shape_chunk`, `audio.EdgeTrimmer`): every Kokoro
+  chunk comes padded with ~0.3 s of silence in front and ~0.5 s behind. With
+  `shape_audio` (engine flag, set from `STREAM_SHAPE_AUDIO` in the app, off by default in
+  unit tests), each streamed pcm/wav chunk has its edge silence trimmed. The trimmer
+  keeps 30 ms with a 5 ms fade, and holds back only the quiet tail, so speech is never
+  delayed. A pause by boundary follows (`audio.PAUSE_AFTER_MS`: sentence 300 ms, clause
+  150, line 450, word 40, end 0). The cache keeps the raw audio, and podcasts don't use
+  this yet. The chunker reports the boundary (`Chunk.boundary`, from
+  `feed_chunks`/`flush_chunk`/`split_chunks`), and the WS `sentence` event carries it
+  along with the spoken `text`.
 - **Text normalization** (`app/core/textnorm.py`): `normalize_for_speech` strips
   markdown, turns URLs into "link" and drops emoji. It runs on each chunk *after*
   chunking (whole text, so it is safe when streaming), and an empty result is skipped.

@@ -103,6 +103,25 @@ Last checked: 2026-09-29.
   to make. Splitting chunks smaller lowers TTFA but can add stalls like this, unless the
   next chunk is at most about 1.5× the previous one's length (since RTF ≈ 0.65), or the
   client buffers a little before playing.
+- **Phase 6 commit 4b (2026-10-06): smooth joins + a WebSocket benchmark.** Kokoro pads
+  every chunk with about 0.3 s of silence in front and 0.5 s behind. That padding is now
+  trimmed, and boundary pauses are added instead. On a 4-chunk answer the audio went from
+  15.2 → 12.8 s; joins went 770 → 200 ms at a comma and 840 → 350 ms between sentences;
+  the 0.3 s of leading silence is gone.
+
+  `bench_latency.py --mode ws` (LLM at 15 words/s, 8 texts, 1 run each, noisy):
+
+  | mode | shaping | hear s (median/max) | gaps | stall s | dead air ≥0.4 s |
+  |---|---|---|---|---|---|
+  | sentence | off | 2.48 / 5.19 | 3 | 5.48 | 13 |
+  | fast_start | off | 2.17 / 5.51 | 4 | 6.33 | 14 |
+  | sentence | on | 3.42 / 7.02 | 5 | 9.19 | 2 |
+  | fast_start | on | 2.03 / 5.55 | 6 | 10.20 | 0 |
+
+  Dead air is gone, but **stalls got worse**: the padding had been an accidental buffer.
+  Short first sentences ("Hi!", "**Sure!**") stall for 2–3 s before a long second one.
+  That is exactly what commit 4c's adaptive scheduling targets. Generation fits about
+  0.9–1.1 s + 30–43 ms/char over WebSocket (CPU load varies between runs).
 - **Phase 6 commit 4a (2026-10-06): sentence splitting fixed.** It used to split
   `3.5`, `$4.99`, `example.com`, `Dr.`, `U.S.`, `e.g.` and `...` (read aloud as
   "three. five"). It also merged sentences before a newline, cut long sentences

@@ -61,7 +61,8 @@ def test_full_turn_streams_audio_before_the_flush():
             ws.send_json({"type": "text", "text": "Hello there. How"})
             first = _recv_until(ws, lambda item: item == ("bytes", b"Hello there.#1"))
             assert first[0] == ("json", {"type": "sentence", "index": 0, "turn": 0,
-                                         "chars": 12, "cached": False})
+                                         "chars": 12, "cached": False,
+                                         "text": "Hello there.", "boundary": "sentence"})
 
             ws.send_json({"type": "text", "text": " are you?"})
             ws.send_json({"type": "flush"})
