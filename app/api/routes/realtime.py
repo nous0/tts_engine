@@ -4,7 +4,7 @@ Protocol (JSON text messages, plus binary audio from the server):
 
 client -> server
     {"type": "start", "provider"?, "voice"?, "speed"?, "instructions"?,
-     "fast_start"?: true, "cache"?: true, "normalize"?: true,
+     "chunking"?: "adaptive"|"fast_start"|"sentence", "cache"?: true, "normalize"?: true,
      "max_sentence_length"?: 200}                                      (first message)
     {"type": "text", "text": "..."}     LLM token deltas, any size
     {"type": "flush"}                   end of the turn: speak what's left
@@ -137,7 +137,7 @@ async def _open_session(
         provider,
         voice,
         SynthOpts(format="pcm", speed=start.speed, instructions=start.instructions),
-        fast_start=start.fast_start,
+        chunking=start.chunking,
         use_cache=start.cache,
         normalize=start.normalize,
         max_turn_chars=settings.ws_max_turn_chars,

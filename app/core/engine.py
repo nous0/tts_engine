@@ -18,6 +18,7 @@ from .chunker import Boundary, split_chunks
 from .providers._audio import wav_stream_header
 from .providers.base import SynthOpts, TTSProvider, Voice
 from .textnorm import normalize_for_speech
+from .timing import SpeechTiming
 
 log = logging.getLogger("app.engine")
 
@@ -73,6 +74,7 @@ class TTSEngine:
         self._default_voice = default_voice
         self._cache = cache
         self._shape_audio = shape_audio
+        self._timings: dict[tuple[str, float], SpeechTiming] = {}
 
     @property
     def shape_audio(self) -> bool:
@@ -90,6 +92,13 @@ class TTSEngine:
     def provider_names(self) -> list[str]:
         """Names of the registered (usable) providers, sorted."""
         return sorted(self._providers)
+
+    def timing(self, provider: TTSProvider, speed: float = 1.0) -> SpeechTiming:
+        """What real-time sessions have learned about this provider at this speed."""
+        key = (provider.name, round(speed, 2))
+        if key not in self._timings:
+            self._timings[key] = SpeechTiming.for_provider(provider, speed)
+        return self._timings[key]
 
     def provider_states(self) -> dict[str, str]:
         """Readiness per provider: ``ready``, or e.g. ``loading`` while a model loads."""

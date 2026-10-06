@@ -103,6 +103,33 @@ Last checked: 2026-09-29.
   to make. Splitting chunks smaller lowers TTFA but can add stalls like this, unless the
   next chunk is at most about 1.5× the previous one's length (since RTF ≈ 0.65), or the
   client buffers a little before playing.
+- **Phase 6 commit 4c (2026-10-07): adaptive chunking** (WS default
+  `chunking: "adaptive"`).
+  - **How it works:** the speaker pulls each chunk when it is ready (`take()`), sized
+    by a learned latency model `a + b·chars` against a playback clock.
+  - **Rules:** the first chunk of a turn is sized for latency; later chunks stay above
+    the break-even length `a / (d − b)` (capped at 120); timing is shared per provider
+    across sessions.
+  - **Torch threads:** `KOKORO_TORCH_THREADS=4` is ~20% faster than torch's default 12.
+    The CPU has 4 P-cores.
+  - **Interleaved benchmark, 15 words/s, CPU at its normal speed (~27 ms/char):**
+
+    | mode | hear median / max | stall total | dead air | chunks (avg chars) | word cuts |
+    |---|---|---|---|---|---|
+    | sentence | 2.47 / 7.93 s | 5.82 s | 2 | 19 (53) | 0 |
+    | fast_start | 1.08 / 3.62 s | 4.78 s | 0 | 22 (42) | 0 |
+    | adaptive | 1.17 / 1.95 s | 0.13 s | 0 | 32 (29) | 16 |
+
+  - **The CPU's speed is the dominant factor.** Across runs Kokoro measured from ~27 up
+    to ~62 ms/char. The cause is Windows' power mode: **"Best power efficiency"**
+    (overlay `961cc777...`) is active even on AC, and the clock sits at 1711/2200 MHz.
+    At ~60 ms/char synthesis is no faster than speech, so every mode stalls (sentence
+    15 s, adaptive 48 s total, the latter as one long pause after a fast first chunk).
+    **To do (user): switch to Best performance, then rerun the final benchmark in
+    commit 5.**
+  - **Bugs found by tests while building it:** a narrow cut window that spoke "Hi!"
+    alone; splitting a word (URL) at the budget; a small-chunk death spiral on a slow
+    CPU; per-session learning that never carried over.
 - **Phase 6 commit 4b (2026-10-06): smooth joins + a WebSocket benchmark.** Kokoro pads
   every chunk with about 0.3 s of silence in front and 0.5 s behind. That padding is now
   trimmed, and boundary pauses are added instead. On a 4-chunk answer the audio went from

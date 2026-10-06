@@ -18,6 +18,13 @@ chunks as splitting the whole text at once.
 With ``fast_start``, the first chunk of a turn may also end at a clause break
 (``,`` ``;`` ``:``) once it is long enough, so the first audio comes sooner. Only the
 first chunk does this: later chunks keep whole sentences, which sound better.
+
+``feed``/``flush`` cut chunks as soon as the text allows ("push"). ``append``/``take``
+instead let the caller decide *when* to cut and how long a chunk may be ("pull"): the
+real-time scheduler (``app/core/session.py``) takes the next chunk only when it is
+ready to synthesize it, with a length that fits the audio still queued for playback.
+``take`` prefers, in order: whole sentences (several, if they fit), a clause break,
+a word boundary before a conjunction, any word boundary.
 """
 
 from __future__ import annotations
@@ -37,6 +44,13 @@ _CLOSERS = "\"'\u201d\u2019)]}*_`"
 # A "." after these words doesn't end a sentence (matched lowercase, inner dots kept).
 _ABBREVIATIONS = frozenset(
     "mr mrs ms dr prof sr jr st vs etc e.g i.e approx inc ltd dept fig a.m p.m".split()
+)
+# A cut just before one of these words keeps the phrasing natural ("..., | and then").
+_CONJUNCTIONS = frozenset(
+    "and but or so because which that who whom whose when while where why how what if "
+    "as like after before since until unless although though whether with for to of in "
+    "on at from about into than then over under through across around during without "
+    "within between".split()
 )
 # "U.S", "J", "e.g"-style initials: single letters joined by dots.
 _INITIALS = re.compile(r"^(?:[A-Za-z]\.)*[A-Za-z]$")
@@ -159,6 +173,69 @@ class SentenceChunker:
             # boundary yet: either way, wait for more text.
             return out
 
+    def append(self, text: str) -> None:
+        """Add text without cutting anything; chunks come out of ``take``."""
+        self._buffer += text
+
+    def take(self, max_chars: int | None, final: bool, min_chars: int = 20) -> Chunk | None:
+        """Cut the next chunk from the buffered text, or ``None`` to wait for more.
+
+        ``max_chars`` caps the chunk (``None`` means only ``max_length``); ``final``
+        says no more text will come in this turn. Whole sentences are preferred, and
+        several are merged when they fit. A sentence shorter than ``min_chars`` waits
+        to be merged with what follows, since a tiny chunk costs nearly as much to
+        synthesize as a long one. A sentence is only cut inside when it doesn't fit,
+        at the best boundary: a clause break, then a word before a conjunction, then
+        any word.
+        """
+        buf = self._buffer.lstrip(" \t\r\n")
+        self._buffer = buf
+        if not buf:
+            return None
+        limit = self._max_length if max_chars is None else min(max_chars, self._max_length)
+        ends = _ends(buf, self._terminators)
+        decided = ends[-1][1] if ends else 0
+        if final and buf[decided:].strip():
+            # End of the turn: whatever is left (e.g. "Done." waiting on what follows)
+            # is a complete piece too.
+            ends.append((len(buf.rstrip()), len(buf), "end"))
+        fitting = [end for end in ends if end[0] <= limit]
+
+        if fitting and fitting[-1][0] >= min_chars:
+            return self._cut(*fitting[-1])
+        if len(buf) <= limit:
+            if final:
+                return self._cut(len(buf.rstrip()), len(buf), "end")
+            return None  # the sentence isn't finished (or is too short): wait
+        # Too long to wait any more. Whole sentences that aren't tiny still beat a cut
+        # mid-sentence; otherwise cut inside, after any tiny leading sentences ("Hi!").
+        if fitting and fitting[-1][0] >= min_chars // 2:
+            return self._cut(*fitting[-1])
+        # Search from half the budget (not from min_chars): with a tight budget, the
+        # window [min_chars, limit] can be too narrow to hold a single space.
+        tiny_end = fitting[-1][0] if fitting else 0
+        inner = _inner_cut(buf, max(min(min_chars, limit // 2), tiny_end + 1), limit)
+        if inner is not None:
+            return self._cut(inner[0], inner[0], inner[1])
+        # No usable boundary within the budget. Never split a word (a URL, a long
+        # number): go past the budget to the next space, within max_length. And never
+        # speak a tiny leading sentence ("Hi!") alone if a word boundary follows it.
+        space = buf.rfind(" ", 0, limit + 1)
+        if fitting and space <= tiny_end:
+            return self._cut(*fitting[-1])
+        if space <= 0:
+            space = buf.find(" ", limit)
+            if not 0 < space <= self._max_length:
+                if not final and len(buf) <= self._max_length:
+                    return None  # the word is still arriving
+                space = min(len(buf), self._max_length)
+        return self._cut(space, space, "word")
+
+    def _cut(self, cut: int, resume: int, boundary: Boundary) -> Chunk:
+        text = self._buffer[:cut].strip()
+        self._buffer = self._buffer[resume:].lstrip(" \t")
+        return Chunk(text, boundary)
+
     def flush(self) -> str | None:
         """End the turn: return any remaining buffered text, or ``None`` if empty.
 
@@ -265,6 +342,66 @@ def _sentence_end(buf: str, terminators: set[str], limit: int) -> tuple[int, int
         while resume < len(buf) and buf[resume] in " \t":
             resume += 1
         return i, resume
+    return None
+
+
+def _ends(buf: str, terminators: set[str]) -> list[tuple[int, int, Boundary]]:
+    """Every decided sentence end and line break in ``buf``, in order.
+
+    Each is ``(cut, resume, boundary)``. A terminator that is the last character is
+    left out (what follows decides; at the end of a turn the caller adds it).
+    """
+    ends: list[tuple[int, int, Boundary]] = []
+    pos = 0
+    while pos < len(buf):
+        sub = buf[pos:]
+        newline = _first_index(sub, _FLUSH_WHITESPACE)
+        limit = newline if newline != -1 else len(sub)
+        end = _sentence_end(sub, terminators, limit)
+        if isinstance(end, tuple):
+            ends.append((pos + end[0], pos + end[1], "sentence"))
+            pos += end[1]
+            continue
+        if newline == -1:
+            break
+        rest = newline + 1
+        while rest < len(sub) and sub[rest] in _FLUSH_WHITESPACE:
+            rest += 1
+        if sub[:newline].strip():
+            ends.append((pos + newline, pos + rest, "line"))
+        pos += rest
+    return ends
+
+
+def _inner_cut(buf: str, lo: int, hi: int) -> tuple[int, Boundary] | None:
+    """Best place to cut inside a sentence, between ``lo`` and ``hi`` characters.
+
+    A clause break beats a word before a conjunction, which beats any word boundary;
+    a cut in the upper half of the range is preferred over a better-ranked one that
+    would leave a much shorter chunk.
+    """
+    hi = min(hi, len(buf) - 1)
+    clause = conj = word = None
+    for i in range(max(lo, 1), hi + 1):
+        if not buf[i].isspace() or buf[i - 1].isspace():
+            continue
+        word = i
+        if buf[i - 1] in _CLAUSE_BREAKS:
+            clause = i
+        nxt = buf[i + 1 :].split(None, 1)
+        if nxt and nxt[0].strip("\"'(*_").lower() in _CONJUNCTIONS:
+            conj = i
+    candidates: list[tuple[int | None, Boundary]] = [
+        (clause, "clause"),
+        (conj, "word"),
+        (word, "word"),
+    ]
+    for cut, boundary in candidates:
+        if cut is not None and cut >= max(lo, hi // 2):
+            return cut, boundary
+    for cut, boundary in candidates:
+        if cut is not None:
+            return cut, boundary
     return None
 
 

@@ -23,6 +23,7 @@ def build_registry(settings: Settings) -> dict[str, TTSProvider]:
         providers["kokoro"] = KokoroProvider(
             default_voice=settings.kokoro_voice,
             max_concurrency=settings.kokoro_max_concurrency,
+            torch_threads=settings.kokoro_torch_threads or None,
         )
 
     if settings.openai_api_key:

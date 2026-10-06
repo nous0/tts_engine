@@ -146,8 +146,11 @@ class WsStart(BaseModel):
     voice: str | None = Field(None, description="Voice id; falls back to a default.")
     speed: float = Field(1.0, ge=0.25, le=4.0)
     instructions: str | None = Field(None, description="Style/tone hint, where supported.")
-    fast_start: bool = Field(
-        True, description="Let each turn's first chunk end at a comma for earlier audio."
+    chunking: Literal["adaptive", "fast_start", "sentence"] = Field(
+        "adaptive",
+        description="adaptive: short first chunk, then chunks sized to the audio queued "
+        "for playback (fast start, no stalls); fast_start: whole sentences except a "
+        "first chunk that may end at a comma; sentence: whole sentences.",
     )
     cache: bool = Field(True, description="Serve cached sentences; false always synthesizes.")
     normalize: bool = Field(

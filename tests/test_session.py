@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 
 import pytest
 
@@ -10,8 +11,10 @@ from app.core.cache import FileCache
 from app.core.engine import InvalidRequest, TTSEngine
 from app.core.providers.base import ProviderError, SynthOpts, Voice
 from app.core.session import (
+    FIRST_CHUNK_MAX_CHARS,
     Audio,
     Cancelled,
+    LatencyModel,
     SentenceStarted,
     SpeechSession,
     TurnDone,
@@ -257,7 +260,7 @@ async def test_normalization_can_be_turned_off():
 
 async def test_decimals_and_abbreviations_are_not_split():
     provider = FakeStreamProvider(chunks=1)
-    session = _session(provider, fast_start=False)
+    session = _session(provider, chunking="sentence")
     for token in "It takes 3.5 seconds, e.g. on Dr. Smith's laptop. Done.".split(" "):
         session.feed(token + " ")
     session.flush()
@@ -273,7 +276,7 @@ async def test_shaped_session_trims_padding_and_adds_boundary_pauses():
     provider = PaddedPcmProvider()
     engine = TTSEngine({"padded": provider}, default_provider="padded", default_voice="v1",
                        shape_audio=True)
-    session = SpeechSession(engine, provider, "v1", PCM, fast_start=False)
+    session = SpeechSession(engine, provider, "v1", PCM, chunking="sentence")
     assert session._shape_audio is True  # follows the engine by default
     session.start()
     session.feed("One. Two.")
@@ -286,3 +289,180 @@ async def test_shaped_session_trims_padding_and_adds_boundary_pauses():
     boundaries = [e.boundary for e in events if isinstance(e, SentenceStarted)]
     assert boundaries == ["sentence", "end"]
     await session.close()
+
+
+# --- adaptive chunking -------------------------------------------------------------
+
+
+class TimedProvider:
+    """Takes ``a + b * chars`` seconds per chunk; its audio lasts ``ms_per_char`` each.
+
+    The defaults make short chunks slower to produce than to play (like Kokoro's fixed
+    cost per chunk) and long ones faster, which is where chunking decides stalls.
+    """
+
+    name = "timed"
+
+    def __init__(self, a: float = 0.15, b: float = 0.004, ms_per_char: float = 10.0):
+        self.a, self.b, self.ms_per_char = a, b, ms_per_char
+        self.latency_prior = (a, b)
+        self.chunks: list[str] = []
+
+    async def synthesize(self, text, voice, opts):
+        return b"".join([c async for c in self.synthesize_stream(text, voice, opts)])
+
+    async def synthesize_stream(self, text, voice, opts):
+        self.chunks.append(text)
+        await asyncio.sleep(self.a + self.b * len(text))
+        frames = int(24_000 * len(text) * self.ms_per_char / 1000)
+        yield b"\x10\x27" * frames  # constant, clearly audible samples
+
+    async def list_voices(self):
+        return [Voice(id="v1", name="v1", provider=self.name)]
+
+
+PARAGRAPH = (
+    "Hi! I can definitely help you plan a relaxing trip to the coast this weekend, "
+    "with a scenic drive along the water and a few great places to stop for lunch. "
+    "Let's start with the route, then pick a hotel near the beach for both nights."
+)
+
+
+async def _play(chunking: str) -> tuple[float, list[str], float]:
+    """Run a turn and play its audio at 1x as it arrives; return (stall s, chunks, first)."""
+    provider = TimedProvider()
+    engine = TTSEngine({"timed": provider}, default_provider="timed", default_voice="v1")
+    session = SpeechSession(engine, provider, "v1", PCM, chunking=chunking, normalize=False)
+    session.start()
+    started = time.monotonic()
+    session.feed(PARAGRAPH)
+    session.flush()
+    play_start = first_audio = None
+    played = stall = 0.0
+    async for event in session.events():
+        now = time.monotonic()
+        if isinstance(event, Audio):
+            if play_start is None:
+                play_start, first_audio = now, now - started
+            elif now > play_start + played + stall:
+                stall += now - (play_start + played + stall)
+            played += len(event.pcm) / 48_000
+        elif isinstance(event, TurnDone):
+            break
+    await session.close()
+    return stall, provider.chunks, first_audio
+
+
+async def test_adaptive_chunking_starts_fast_and_never_stalls():
+    stall, chunks, first_audio = await _play("adaptive")
+    assert stall < 0.1, f"stalled {stall:.2f}s with chunks {chunks}"
+    assert len(chunks[0]) <= FIRST_CHUNK_MAX_CHARS  # a short first chunk ...
+    assert first_audio < 0.5  # ... so audio starts quickly
+    assert "Hi!" not in chunks  # the tiny first sentence was merged, not spoken alone
+    assert max(len(c) for c in chunks) > len(chunks[0])  # chunks grew
+
+
+async def test_sentence_chunking_stalls_on_the_same_text():
+    stall, chunks, _ = await _play("sentence")
+    assert chunks[0] == "Hi!"
+    assert stall > 0.3  # the long second sentence takes longer than "Hi!" plays
+
+
+def test_latency_model_learns_the_real_cost():
+    model = LatencyModel(prior=(1.0, 0.05))
+    assert model.estimate() == pytest.approx((1.0, 0.05))
+    for chars in [20, 60, 100, 40, 80] * 4:
+        model.update(chars, 0.3 + 0.01 * chars)
+    a, b = model.estimate()
+    assert a == pytest.approx(0.3, abs=0.05) and b == pytest.approx(0.01, abs=0.002)
+
+
+async def test_adaptive_session_numbers_turns_and_finishes_short_ones():
+    session = _session(FakeStreamProvider(), chunking="adaptive")
+    for expected in range(3):
+        session.feed("Hi.")  # shorter than the minimum: spoken when the turn ends
+        assert session.flush() == expected
+        events = await _collect_until(session, TurnDone)
+        assert events[-1] == TurnDone(expected)
+        assert [e.boundary for e in events if isinstance(e, SentenceStarted)] == ["end"]
+    await session.close()
+
+
+async def test_adaptive_session_speaks_before_the_turn_ends():
+    provider = FakeStreamProvider()
+    session = _session(provider, chunking="adaptive")
+    first = "This first sentence is long enough to speak now."
+    session.feed(first + " And then")
+    await _collect_until(session, Audio)
+    # Nothing is queued for playback yet, so the first chunk is short.
+    assert first.startswith(provider.started[0])
+    assert len(provider.started[0]) <= FIRST_CHUNK_MAX_CHARS
+    session.feed(" a second one.")
+    session.flush()
+    await _collect_until(session, TurnDone)
+    spoken = " ".join(provider.started)
+    assert spoken.split() == (first + " And then a second one.").split()
+    await session.close()
+
+
+async def test_adaptive_cancel_stops_speech_and_drops_the_turn():
+    provider = FakeStreamProvider(chunks=50, delay=0.02)
+    session = _session(provider, chunking="adaptive")
+    session.feed("The first sentence is being spoken right now. A second one is waiting.")
+    session.flush()
+    await _collect_until(session, Audio)
+    await session.cancel()
+    events = await _collect_until(session, Cancelled)
+    assert not any(isinstance(e, TurnDone) for e in events)
+    assert len(provider.started) == 1 and provider.started[0] not in provider.completed
+
+    provider.chunks, provider.delay = 1, 0.0
+    session.feed("A fresh turn after the cancel.")
+    turn = session.flush()
+    assert (await _collect_until(session, TurnDone))[-1] == TurnDone(turn)
+    await session.close()
+
+
+async def test_adaptive_failure_ends_only_its_turn():
+    provider = FakeStreamProvider(fail_on="Bad")
+    session = _session(provider, chunking="adaptive")
+    session.feed("This Bad sentence fails to synthesize. The rest is skipped.")
+    session.flush()
+    failed = (await _collect_until(session, TurnFailed))[-1]
+    assert failed.turn == 0
+    session.feed("The next turn works fine again.")
+    turn = session.flush()
+    assert (await _collect_until(session, TurnDone))[-1] == TurnDone(turn)
+    assert not any("rest is skipped" in s for s in provider.started)
+    await session.close()
+
+
+async def test_adaptive_chunks_stay_above_break_even_on_a_slow_machine():
+    # Each chunk costs 0.2 s + 4 ms/char but speaks only 6 ms/char: anything under
+    # 100 chars takes longer to make than to play. Small chunks would stall forever.
+    provider = TimedProvider(a=0.2, b=0.004, ms_per_char=6)
+    engine = TTSEngine({"timed": provider}, default_provider="timed", default_voice="v1")
+    session = SpeechSession(engine, provider, "v1", PCM, chunking="adaptive",
+                            normalize=False)
+    session._timing.audio_per_char = 0.006  # this voice speaks faster than the prior
+    session.start()
+    session.feed(PARAGRAPH)
+    session.flush()
+    await _collect_until(session, TurnDone, timeout=20)
+    first, *rest = provider.chunks
+    assert len(first) <= FIRST_CHUNK_MAX_CHARS  # the listener is waiting: latency first
+    # After that, chunks stay above break-even so the buffer can catch up.
+    assert all(len(chunk) >= 100 for chunk in rest[:-1]), provider.chunks
+    await session.close()
+
+
+async def test_sessions_share_what_they_learn_about_a_provider():
+    provider = FakeStreamProvider()
+    engine = TTSEngine({"fake": provider}, default_provider="fake", default_voice="v1")
+    first = SpeechSession(engine, provider, "v1", PCM, chunking="adaptive")
+    first._timing.latency.update(50, 9.0)  # pretend it learned the CPU is very slow
+    second = SpeechSession(engine, provider, "v1", PCM, chunking="adaptive")
+    assert second._timing is first._timing
+    faster = SpeechSession(engine, provider, "v1", SynthOpts(format="pcm", speed=1.5),
+                           chunking="adaptive")
+    assert faster._timing is not first._timing  # another speed speaks at another rate

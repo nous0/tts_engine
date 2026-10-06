@@ -19,6 +19,8 @@ def isolated_output(tmp_path, monkeypatch):
     monkeypatch.setenv("CACHE_DIR", str(out_dir / "cache"))
     # Never load the real Kokoro model at app startup in tests.
     monkeypatch.setenv("KOKORO_PRELOAD", "false")
+    # Don't import the real torch to set its thread count when a fake pipeline loads.
+    monkeypatch.setenv("KOKORO_TORCH_THREADS", "0")
     get_settings.cache_clear()
     yield out_dir
     get_settings.cache_clear()

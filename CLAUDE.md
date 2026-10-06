@@ -126,6 +126,29 @@ Request flow: **route → `TTSEngine` → provider → (podcast only) audio pipe
   - No chunk exceeds `max_length`, whichever way it ends.
   - `fast_start=True` lets a turn's first chunk end at `,;:` (followed by whitespace)
     once it's 24+ chars. `flush()`/`reset()` start a new turn.
+  - Pull mode (`append()` + `take(max_chars, final, min_chars)`) is for the adaptive
+    scheduler. It takes whole sentences (merging several if they fit), waits while it
+    can, and cuts inside a sentence only when the buffer exceeds `max_chars`. The cut
+    goes at a clause break, else before a conjunction or preposition (`_CONJUNCTIONS`),
+    else at any word. It never splits a word, and it merges a tiny leading sentence
+    ("Hi!") instead of speaking it alone.
+- **Adaptive scheduling** (`SpeechSession(chunking="adaptive")`, the WS default):
+  - The speaker pulls the next chunk only when ready, sized by `_budget()`. The first
+    chunk of a turn is sized for latency (`FIRST_CHUNK_TARGET_S`, ≤
+    `FIRST_CHUNK_MAX_CHARS`).
+  - Later chunks must be synthesized before the queued audio (playback clock) runs out.
+    The limit is `(SAFETY * ahead - a) / b`, and `None` (whole sentences) once there is
+    enough audio queued.
+  - No chunk goes below the break-even length `a / (d - b)`, below which a chunk takes
+    longer to make than to play. Without this, a busy CPU spirals into tiny chunks.
+  - `a`, `b` (latency: `timing.LatencyModel`, EWLS seeded by the provider's
+    `latency_prior`) and `d` (speech seconds per char) are learned per provider and
+    speed on the engine (`TTSEngine.timing`), so they carry over between sessions.
+  - Kokoro on this laptop CPU (i7-1360P: 4 P-cores + 8 E-cores, *Balanced* power plan)
+    varies up to ~2.5x in speed run to run. Benchmarks must interleave modes, and the
+    scheduler must stay robust to that.
+  - `KOKORO_TORCH_THREADS=4` is ~20% faster than torch's default 12. It is applied in
+    the Kokoro worker thread when the pipeline loads.
 - **Joining streamed chunks** (`engine.shape_chunk`, `audio.EdgeTrimmer`): every Kokoro
   chunk comes padded with ~0.3 s of silence in front and ~0.5 s behind. With
   `shape_audio` (engine flag, set from `STREAM_SHAPE_AUDIO` in the app, off by default in
@@ -169,6 +192,11 @@ Request flow: **route → `TTSEngine` → provider → (podcast only) audio pipe
   at a tmp dir and clears the `get_settings()` lru_cache. If a test changes settings through env
   vars, call `get_settings.cache_clear()` so the change takes effect.
 - `asyncio_mode = "auto"`, so async tests need no decorator.
+- conftest also sets `KOKORO_PRELOAD=false` and `KOKORO_TORCH_THREADS=0`, so app
+  startup in tests never loads the model or imports torch. A slow background torch
+  import made the preload tests flaky.
+- Timing-based tests (`test_session.py`'s `TimedProvider`) use small, fast delays and
+  generous thresholds; keep them that way.
 - Provider network calls are mocked. Tests shouldn't need real keys or the Kokoro model.
   `tests/test_openai.py` runs the real OpenAI SDK against `httpx.MockTransport` (error
   responses carry `retry-after-ms: 1` to keep retries fast). Kokoro tests inject fake

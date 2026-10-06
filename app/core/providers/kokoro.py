@@ -140,8 +140,18 @@ class KokoroProvider:
     name = "kokoro"
     native_formats = NATIVE_FORMATS
 
-    def __init__(self, default_voice: str = "af_heart", max_concurrency: int = 1) -> None:
+    # Time to a chunk's first audio ~ a + b * chars (seconds), measured with 4 torch
+    # threads on a 16-thread CPU; the speech scheduler refines it as it goes.
+    latency_prior = (0.65, 0.025)
+
+    def __init__(
+        self,
+        default_voice: str = "af_heart",
+        max_concurrency: int = 1,
+        torch_threads: int | None = None,
+    ) -> None:
         self._default_voice = default_voice
+        self._torch_threads = torch_threads
         self._pipelines: dict[str, object] = {}  # lang_code -> KPipeline (lazy)
         self._pipeline_lock = threading.Lock()
         self._loading = False
@@ -211,6 +221,12 @@ class KokoroProvider:
                     ) from exc
                 log.info("loading Kokoro pipeline (lang=%s)", lang_code)
                 self._loading = True
+                if self._torch_threads:
+                    import torch
+
+                    # More threads is slower here: at 4 threads a short chunk takes
+                    # ~0.76 s vs ~0.97 s at torch's default of 12 (16-thread CPU).
+                    torch.set_num_threads(self._torch_threads)
                 try:
                     pipe = KPipeline(lang_code=lang_code)
                 except Exception as exc:  # download/load failure: report, don't crash

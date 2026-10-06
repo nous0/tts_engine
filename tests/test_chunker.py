@@ -7,6 +7,7 @@ import random
 import pytest
 
 from app.core.chunker import (
+    Chunk,
     SentenceChunker,
     iter_sentences,
     split_sentences,
@@ -280,3 +281,90 @@ def test_streaming_token_by_token_matches_the_whole_text(index, fast_start):
         if tail:
             streamed.append(tail)
         assert streamed == expected, f"token split changed the chunks for {text!r}"
+
+
+# --- pull mode: append / take ------------------------------------------------------
+
+
+def _pull(text: str, budgets: list[int | None], final: bool = True) -> list[Chunk]:
+    chunker = SentenceChunker()
+    chunker.append(text)
+    out: list[Chunk] = []
+    for budget in budgets + [None] * 20:
+        chunk = chunker.take(budget, final=final)
+        if chunk is None:
+            break
+        out.append(chunk)
+    return out
+
+
+def test_take_waits_for_an_unfinished_sentence():
+    chunker = SentenceChunker()
+    chunker.append("Hello there, how are")
+    assert chunker.take(40, final=False) is None
+    chunker.append(" you today?")
+    assert chunker.take(40, final=True) == Chunk("Hello there, how are you today?", "end")
+
+
+def test_take_merges_whole_sentences_that_fit():
+    # (With the whole turn fitting the budget, it would all be one chunk.)
+    chunks = _pull("One sentence here. Another one here. A third sentence.", [40])
+    assert chunks[0] == Chunk("One sentence here. Another one here.", "sentence")
+
+
+def test_take_merges_a_tiny_first_sentence_instead_of_speaking_it_alone():
+    chunker = SentenceChunker()
+    chunker.append("Hi! I can")
+    assert chunker.take(40, final=False) is None  # "Hi!" alone is too short: wait
+    chunker.append(" help you plan a relaxing trip to the coast this weekend.")
+    chunk = chunker.take(40, final=False)
+    assert chunk.text.startswith("Hi! I can help") and len(chunk.text) <= 40
+
+
+def test_take_cuts_inside_a_long_sentence_at_the_best_boundary():
+    clause = _pull("When you think about how speech has changed over the years, the rest.",
+                   [65])[0]
+    assert clause == Chunk("When you think about how speech has changed over the years,",
+                           "clause")
+    conj = _pull("The weather is sunny with a light breeze that makes it perfect today.",
+                 [50])[0]
+    assert conj.text == "The weather is sunny with a light breeze" and conj.boundary == "word"
+
+
+def test_take_respects_the_budget_and_minimum():
+    text = "word " * 40 + "end."
+    for budget in (20, 33, 57):
+        chunk = _pull(text, [budget])[0]
+        # The minimum is soft: with a budget right at it, the nearest word wins.
+        assert 15 <= len(chunk.text) <= budget
+
+
+def test_take_without_a_budget_uses_whole_sentences():
+    chunks = _pull("First sentence, with a comma. Second sentence.", [None])
+    assert chunks == [Chunk("First sentence, with a comma. Second sentence.", "end")]
+
+
+@pytest.mark.parametrize("index", range(len(INVARIANT_CORPUS)))
+def test_take_never_loses_or_duplicates_text(index):
+    text = INVARIANT_CORPUS[index]
+    rng = random.Random(index)
+    for _ in range(30):
+        chunker = SentenceChunker(max_length=80)
+        taken: list[str] = []
+        pos = 0
+        while pos < len(text):  # text arrives in random pieces, takes interleave
+            size = rng.randint(1, 12)
+            chunker.append(text[pos : pos + size])
+            pos += size
+            chunk = chunker.take(rng.choice([20, 30, 45, 80, None]), final=False)
+            if chunk:
+                taken.append(chunk.text)
+                assert len(chunk.text) <= 80
+        while (chunk := chunker.take(rng.choice([20, 45, None]), final=True)) is not None:
+            taken.append(chunk.text)
+        assert " ".join(taken).split() == text.split()
+
+
+def test_take_never_splits_a_word_even_past_the_budget():
+    chunks = _pull("https://docs.example.org/a?b=1 for details.", [20])
+    assert chunks[0].text == "https://docs.example.org/a?b=1"

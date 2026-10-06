@@ -38,6 +38,8 @@ uv run streamlit run streamlit_app.py      # optional browser test UI
 ```
 
 - Swagger UI: http://127.0.0.1:8000/docs
+- For real-time speech with Kokoro, set Windows' power mode to **Best performance**:
+  "Best power efficiency" can make synthesis ~2x slower, which is slower than real time.
 - Health: http://127.0.0.1:8000/health returns readiness per provider, e.g.
   `{"status": "ok", "default_provider": "kokoro", "providers": {"kokoro": "ready", "openai": "ready"}}`.
   Kokoro loads in the background at startup (`KOKORO_PRELOAD=true`), so it shows
@@ -101,17 +103,25 @@ any time (barge-in).
 
 | Direction | Message |
 |---|---|
-| client → server | `{"type": "start", "provider"?, "voice"?, "speed"?, "fast_start"?: true, "cache"?: true}` (must be first) · `{"type": "text", "text": "..."}` (any size) · `{"type": "flush"}` (end of turn) · `{"type": "cancel"}` (stop speaking now) |
-| server → client | `{"type": "ready", "sample_rate": 24000, "channels": 1, "sample_width": 2, "format": "pcm", ...}` · `{"type": "sentence", "index", "turn", "chars", "cached"}` · **binary frames: raw PCM** (s16le, mono) · `{"type": "done", "turn"}` · `{"type": "cancelled"}` · `{"type": "error", "detail", "status", "kind"?, "turn"?}` |
+| client → server | `{"type": "start", "provider"?, "voice"?, "speed"?, "chunking"?: "adaptive", "cache"?: true, "normalize"?: true}` (must be first) · `{"type": "text", "text": "..."}` (any size) · `{"type": "flush"}` (end of turn) · `{"type": "cancel"}` (stop speaking now) |
+| server → client | `{"type": "ready", "sample_rate": 24000, "channels": 1, "sample_width": 2, "format": "pcm", ...}` · `{"type": "sentence", "index", "turn", "chars", "cached", "text", "boundary"}` · **binary frames: raw PCM** (s16le, mono) · `{"type": "done", "turn"}` · `{"type": "cancelled"}` · `{"type": "error", "detail", "status", "kind"?, "turn"?}` |
 
 - Each turn ends with exactly one of `done`, `error` (with `turn`), or `cancelled`.
   `cancelled` ends every pending turn.
 - A bad `start` (unknown provider or voice, malformed message) gets an `error` and the
   connection closes with code 1008. Other bad messages get an `error`, and the session
   keeps going.
-- `fast_start` is on by default here: each turn's first chunk may end at a comma, so audio
-  starts sooner. Sentences are cached like `/v1/speech/stream` (`"cache": false` to
-  skip).
+- `chunking` decides how text is cut into chunks to synthesize:
+  - **`adaptive`** (default): the first chunk of a turn is short, so audio starts fast.
+    Each next chunk is sized so that it is synthesized before the audio already queued
+    runs out (no stalls), and grows as that queue builds. Once enough is queued, whole
+    sentences are used again.
+  - `fast_start`: whole sentences, but the first one may end at a comma.
+  - `sentence`: whole sentences.
+
+  Adaptive learns the provider's speed as it goes (shared across sessions), so it adapts
+  to a slower or busier CPU. Chunks are cached like `/v1/speech/stream` (`"cache": false`
+  to skip).
 - `normalize` is on by default here: markdown, links and emoji in LLM output are removed
   before speaking (`**bold**` → "bold", a URL → "link"). The HTTP stream has the same
   `normalize` field, off by default.
@@ -132,17 +142,25 @@ Try it with the reference client, which sends a demo answer word by word, like a
 ```bash
 uv run python examples/ws_client.py                      # prints a timeline, saves output/ws_client.wav
 uv run python examples/ws_client.py --cancel-after 3     # barge-in
-uv run python examples/ws_client.py --no-fast-start --no-cache
+uv run python examples/ws_client.py --chunking sentence --no-cache
 ```
 
-Measured on Kokoro/CPU, from the first sentence being fully sent to its audio arriving:
+Measured with `scripts/bench_latency.py --mode ws` (Kokoro/CPU, a fake LLM at 15
+words/s, 8 chatbot-style answers). *Hear* is the time from the first sentence being
+complete to the first audible sound:
 
-| Setup | Delay |
-|---|---|
-| Without `fast_start` (108-char first sentence) | 4.99 s |
-| With `fast_start` (57-char first clause) | 2.29 s |
-| With `fast_start` (43-char first clause) | 1.44 s |
-| Cached | Audio already playing before the sentence was complete |
+| chunking | hear (median / max) | total stalls | dead air ≥ 0.4 s |
+|---|---|---|---|
+| sentence | 2.47 / 7.93 s | 5.82 s | 2 |
+| fast_start | 1.08 / 3.62 s | 4.78 s | 0 |
+| **adaptive** | **1.17 / 1.95 s** | **0.13 s** | **0** |
+
+Kokoro needs a CPU that synthesizes faster than real time. These numbers are from a
+laptop i7-1360P when it ran at ~27 ms of synthesis per character (speech is ~62 ms per
+character). In Windows' "Best power efficiency" power mode, the same CPU dropped to
+55–62 ms/char: then synthesis is barely real-time, and every mode stalls. Use
+**Best performance** for real-time speech, or OpenAI. Cached answers start in about
+10 ms.
 
 ### Voices
 

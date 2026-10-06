@@ -54,6 +54,9 @@ class OpenAIProvider:
     """TTSProvider implementation backed by the OpenAI audio API."""
 
     name = "openai"
+    # Time to a chunk's first audio ~ a + b * chars (network round trip dominates);
+    # the speech scheduler refines it as it goes.
+    latency_prior = (0.8, 0.005)
 
     def __init__(
         self,

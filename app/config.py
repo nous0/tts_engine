@@ -21,6 +21,10 @@ class Settings(BaseSettings):
     kokoro_max_concurrency: int = Field(1, ge=1, le=8)
     # Load the model in the background at startup, so the first request doesn't wait.
     kokoro_preload: bool = True
+    # torch intra-op threads for Kokoro. Fewer than the default is faster: measured on a
+    # 16-thread CPU, 4 threads cut synthesis time 16-22% vs torch's default (12).
+    # 0 keeps torch's default.
+    kokoro_torch_threads: int = Field(4, ge=0, le=64)
     openai_api_key: str | None = None
     openai_tts_model: str = "gpt-4o-mini-tts"
     openai_voice: str = "alloy"

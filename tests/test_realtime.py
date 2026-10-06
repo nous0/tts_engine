@@ -14,7 +14,9 @@ from app.main import app
 from tests.test_session import FakeStreamProvider
 
 URL = "/v1/speech/ws"
-START = {"type": "start"}
+# The protocol tests below assert exact chunks, so they use push chunking; adaptive
+# chunking (the default) has its own tests.
+START = {"type": "start", "chunking": "fast_start"}
 
 
 def _install(provider: FakeStreamProvider) -> None:
@@ -203,3 +205,21 @@ def test_cached_sentences_are_flagged(tmp_path):
                 flags += [i[1]["cached"] for i in items if _is("sentence")(i)]
     assert flags == [False, True]
     assert provider.started == ["Hello there."]
+
+
+def test_default_chunking_is_adaptive():
+    provider = FakeStreamProvider(chunks=1)
+    with TestClient(app) as client:
+        _install(provider)
+        with client.websocket_connect(URL) as ws:
+            ws.send_json({"type": "start"})
+            assert _recv(ws)[1]["type"] == "ready"
+            text = "Hi! This answer streams in adaptively sized chunks, then ends."
+            ws.send_json({"type": "text", "text": text})
+            ws.send_json({"type": "flush"})
+            items = _recv_until(ws, _is("done"))
+    sentences = [item[1] for item in items if _is("sentence")(item)]
+    assert "Hi!" not in [s["text"] for s in sentences]  # tiny first sentence merged
+    assert " ".join(s["text"] for s in sentences).split() == text.split()
+    assert all(s["boundary"] in ("sentence", "clause", "word", "line", "end")
+               for s in sentences)

@@ -84,11 +84,7 @@ CHAT_TEXTS = {
     ),
 }
 
-CHUNKING = {
-    "sentence": {"fast_start": False},
-    "fast_start": {"fast_start": True},
-    "adaptive": {"chunking": "adaptive"},
-}
+CHUNKING = {mode: {"chunking": mode} for mode in ("sentence", "fast_start", "adaptive")}
 
 
 # --- http mode ---------------------------------------------------------------------
@@ -305,25 +301,33 @@ async def run_ws(args: argparse.Namespace) -> int:
     url = url.rstrip("/") + "/v1/speech/ws"
     modes = list(CHUNKING) if args.chunking == "all" else [args.chunking]
     speeds = [float(x) for x in args.wps.split(",")]
+    # Warm up like a server that has been running a while: the CPU leaves power saving,
+    # and the server's shared latency model (per provider) has seen a few chunks.
     print("warming up...")
-    await measure_ws(url, "Warm up.", 50, "sentence", args.provider, args.voice, False)
+    for text in ("Warm up.", CHAT_TEXTS["medium"], CHAT_TEXTS["paragraph"]):
+        await measure_ws(url, text, 50, "adaptive", args.provider, args.voice, False)
 
     for wps in speeds:
         print(f"\n=== LLM at {wps:g} words/s, provider={args.provider}, "
               f"use_cache={args.use_cache}, runs={args.runs} ===")
         print(f"{'mode':<11} {'text':<20} {'hear s':>6} {'gaps':>4} {'stall s':>7} "
               f"{'dead':>4} {'chunks':>6} {'avg':>5} {'word':>4}")
-        for mode in modes:
-            rows, gen_points = [], []
+        # Interleave the modes text by text, run by run: CPU speed drifts (a laptop's
+        # boost and thermals), and every mode should see the same conditions.
+        results: dict[str, dict[str, list[dict]]] = {m: {n: [] for n in CHAT_TEXTS}
+                                                     for m in modes}
+        for _ in range(args.runs):
             for name, text in CHAT_TEXTS.items():
-                runs = []
-                for _ in range(args.runs):
+                for mode in modes:
                     try:
-                        runs.append(await measure_ws(url, text, wps, mode, args.provider,
-                                                     args.voice, args.use_cache))
+                        results[mode][name].append(await measure_ws(
+                            url, text, wps, mode, args.provider, args.voice, args.use_cache))
                     except SystemExit as exc:
                         print(f"{mode:<11} {name:<20} skipped: {exc}")
-                        break
+        for mode in modes:
+            rows, gen_points = [], []
+            for name in CHAT_TEXTS:
+                runs = results[mode][name]
                 if not runs:
                     continue
                 gen_points += [p for r in runs for p in r["gen"]]

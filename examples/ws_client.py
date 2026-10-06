@@ -10,7 +10,7 @@ as an integration example.
     uv run python examples/ws_client.py              # terminal 2
     uv run python examples/ws_client.py --words-per-second 5 --text "Your own text."
     uv run python examples/ws_client.py --cancel-after 1.5    # barge-in test
-    uv run python examples/ws_client.py --no-fast-start --no-cache
+    uv run python examples/ws_client.py --chunking sentence --no-cache
 
 The key number is **first audio after the first sentence**: how long after the first
 sentence was fully sent the first audio arrived. That is the delay a user would hear.
@@ -48,7 +48,7 @@ def first_sentence_end(text: str) -> int:
 
 async def run(args: argparse.Namespace) -> int:
     text = args.text or DEFAULT_TEXT
-    start = {"type": "start", "fast_start": not args.no_fast_start, "cache": not args.no_cache}
+    start = {"type": "start", "chunking": args.chunking, "cache": not args.no_cache}
     if args.voice:
         start["voice"] = args.voice
     if args.provider:
@@ -67,7 +67,7 @@ async def run(args: argparse.Namespace) -> int:
             return 1
         sample_rate = ready["sample_rate"]
         print(f"ready: provider={ready['provider']} voice={ready['voice']} "
-              f"{sample_rate} Hz pcm, fast_start={start['fast_start']}, cache={start['cache']}")
+              f"{sample_rate} Hz pcm, chunking={start['chunking']}, cache={start['cache']}")
         t0 = time.perf_counter()
 
         def now() -> float:
@@ -104,8 +104,9 @@ async def run(args: argparse.Namespace) -> int:
                 kind = event["type"]
                 if kind == "sentence":
                     cached += event["cached"]
-                    print(f"{now():6.2f}s  sentence #{event['index']} "
-                          f"({event['chars']} chars, cached={event['cached']})")
+                    print(f"{now():6.2f}s  chunk #{event['index']} "
+                          f"({event['chars']} chars, {event.get('boundary', '?')}, "
+                          f"cached={event['cached']}): {event.get('text', '')!r}")
                 elif kind in ("done", "cancelled") or (kind == "error" and "turn" in event):
                     print(f"{now():6.2f}s  {kind}" + (f": {event['detail']}"
                                                       if kind == "error" else ""))
@@ -152,7 +153,8 @@ def main() -> int:
                         help="how fast the fake LLM sends words (default 15)")
     parser.add_argument("--provider", default=None)
     parser.add_argument("--voice", default=None)
-    parser.add_argument("--no-fast-start", action="store_true")
+    parser.add_argument("--chunking", default="adaptive",
+                        choices=["adaptive", "fast_start", "sentence"])
     parser.add_argument("--no-cache", action="store_true")
     parser.add_argument("--cancel-after", type=float, default=None, metavar="SECONDS",
                         help="send a cancel (barge-in) after this many seconds")
