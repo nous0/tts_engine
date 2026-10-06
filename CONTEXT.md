@@ -103,6 +103,20 @@ Last checked: 2026-09-29.
   to make. Splitting chunks smaller lowers TTFA but can add stalls like this, unless the
   next chunk is at most about 1.5× the previous one's length (since RTF ≈ 0.65), or the
   client buffers a little before playing.
+- **Phase 6 commit 4d (2026-10-07): Gradio voice chat demo** (`examples/voice_chat_ui.py`,
+  extra `demo`, ffmpeg needed).
+  - **Spike** (headless Chromium via `uv run --with playwright`): Gradio's streaming
+    player added 0.76–1.0 s from yield to playback when warm, and 2.6 s on the first
+    stream, but **no gaps** (one AAC encoder per stream). The earlier "end-of-stream
+    stall" came only from the spike sleeping after its last yield. It misses the
+    ≤ 0.4 s target, and **the user chose to keep Gradio** over a custom Web Audio page.
+  - **Driven end to end in headless Chromium:** the text streams, speech plays, and
+    **Stop** stops playback within 0.6 s, with the TTS log showing "speech cancelled".
+    Enter → playback was ~2.0 s on the first question and ~1.3 s warm (TTS first audio
+    0.45 s; answers repeated, so cache hits).
+  - **The `OPENAI_API_KEY` in `.env` is rejected by OpenAI (401).** The OpenAI provider
+    still registers (the key isn't empty) but every call returns 502, and the demo falls
+    back to the Fake LLM. **To do (user): put a valid key in `.env`.**
 - **Phase 6 commit 4c (2026-10-07): adaptive chunking** (WS default
   `chunking: "adaptive"`).
   - **How it works:** the speaker pulls each chunk when it is ready (`take()`), sized

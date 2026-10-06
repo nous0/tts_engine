@@ -19,7 +19,7 @@ Gemini was removed on 2026-09-22 by decision; ElevenLabs is out of scope.
 
 ## Commands
 
-Uses `uv` (there's a `uv.lock`). Extras: `dev` (pytest, ruff), `ui` (streamlit), `local` (kokoro + soundfile, which pulls in CPU torch).
+Uses `uv` (there's a `uv.lock`). Extras: `dev` (pytest, ruff), `ui` (streamlit), `local` (kokoro + soundfile, which pulls in CPU torch), `demo` (gradio + websockets for `examples/voice_chat_ui.py`; needs ffmpeg).
 
 ```bash
 uv sync --extra dev --extra local --extra ui     # install
@@ -38,6 +38,7 @@ uv run ruff check .                              # lint (E,F,I,UP,B; line length
 uv run ruff format .
 
 uv run python examples/ws_client.py                           # WebSocket client: fake LLM tokens -> audio
+uv run python examples/voice_chat_ui.py                       # Gradio voice chat demo (extra: demo)
 uv run python examples/generate_podcast.py examples/script.json  # end-to-end podcast
 ```
 
@@ -185,6 +186,15 @@ Request flow: **route → `TTSEngine` → provider → (podcast only) audio pipe
   - Every SQLite call goes through `_in_thread`, which keeps the lock until the thread
     finishes even if the caller is cancelled, and `close()` takes the same lock. Closing the
     connection under a running query crashes the process.
+
+- **Voice chat demo** (`examples/voice_chat_ui.py`): the Gradio backend plays the
+  chatbot. It runs the LLM (OpenAI or the Fake LLM), sends deltas to `/v1/speech/ws`,
+  and yields WAV chunks to `gr.Audio(streaming=True)`. Gradio decodes those with the
+  stdlib and keeps one ffmpeg AAC encoder per stream, so it's gapless. That player adds
+  ~0.8 s before playback (measured with headless Chromium); the user accepted this over
+  a custom Web Audio page. Barge-in works through a per-session token: Stop or a new
+  question supersedes the running answer, which sends `cancel`.
+  `tests/test_voice_chat_ui.py` covers its non-UI logic and is skipped without gradio.
 
 ## Testing notes
 

@@ -22,6 +22,11 @@ dev = [
 ui = [
     "streamlit>=1.36",
 ]
+demo = [
+    # Voice-chat demo (examples/voice_chat_ui.py): Gradio UI, WebSocket client.
+    "gradio>=5",
+    "websockets>=13",
+]
 local = [
     # Kokoro-82M local TTS (CPU). Pulls torch (CPU), numpy, misaki, huggingface_hub.
     "kokoro>=0.9",

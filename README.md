@@ -248,10 +248,32 @@ mixed into the audio.
 
 All settings are listed in `.env.example`.
 
+## Voice chat demo
+
+A chatbot that speaks while it is still writing, in the browser (Gradio). It needs the
+`demo` extra and **ffmpeg on PATH**, because Gradio's player streams AAC.
+
+```bash
+uv sync --extra demo
+uv run uvicorn app.main:app --port 8000      # terminal 1: the TTS server
+uv run python examples/voice_chat_ui.py      # terminal 2: open http://127.0.0.1:7860
+```
+
+- Type a question. The answer streams into the chat and is spoken as it arrives.
+  **Stop**, or a new question, cancels the speech right away (barge-in).
+- **Fake LLM** (canned answers, no key) is on automatically when the OpenAI key doesn't
+  work; with a valid `OPENAI_API_KEY` it chats for real (`DEMO_CHAT_MODEL`, default
+  `gpt-4o-mini`). The demo is local only (`127.0.0.1`, no public share link).
+- Gradio's streaming player adds about **0.8 s** before playback, because it re-encodes
+  the stream for the browser. Measured: the TTS server's first audio came 0.45 s after
+  Enter, and playback 1.3 s after Enter. The first question after startup takes about
+  2 s, while ffmpeg starts.
+
 ## Examples
 
 ```bash
 uv run python examples/ws_client.py                                         # fake LLM tokens -> WebSocket -> output/ws_client.wav
+uv run python examples/voice_chat_ui.py                                     # voice chat in the browser (demo extra)
 uv run python examples/generate_podcast.py examples/script_trio.txt --provider kokoro   # 3 speakers (2 female, 1 male)
 uv run python examples/generate_podcast.py examples/script.json --provider kokoro   # -> output/script.wav
 ```
