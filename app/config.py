@@ -46,6 +46,12 @@ class Settings(BaseSettings):
     cache_dir: str = "./output/cache"
     cache_max_mb: int = Field(512, ge=0)
 
+    # WebSocket /v1/speech/ws
+    # Browser origins allowed to connect (comma-separated, e.g. "http://localhost:7860").
+    # Connections without an Origin header (server-side clients) are always allowed.
+    ws_allowed_origins: str = ""
+    ws_max_turn_chars: int = Field(10_000, ge=100)
+
     # Logging (app + openai loggers): DEBUG, INFO, WARNING, ERROR
     log_level: str = "INFO"
 

@@ -11,7 +11,8 @@ from pathlib import Path
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
-from app.api.routes import podcast, speech, voices
+from app.api.errors import error_payload
+from app.api.routes import podcast, realtime, speech, voices
 from app.config import get_settings
 from app.core.cache import FileCache
 from app.core.engine import InvalidRequest, ProviderNotConfigured, TTSEngine
@@ -74,16 +75,7 @@ app = FastAPI(title="TTS Engine", version="0.1.0", lifespan=lifespan)
 app.include_router(speech.router)
 app.include_router(podcast.router)
 app.include_router(voices.router)
-
-
-# How each ProviderError kind reaches the client.
-_PROVIDER_ERROR_STATUS = {
-    "bad_request": 400,
-    "auth": 502,
-    "upstream": 502,
-    "rate_limited": 503,
-    "timeout": 504,
-}
+app.include_router(realtime.router)
 
 
 @app.exception_handler(ProviderError)
@@ -91,9 +83,10 @@ async def provider_error_handler(request: Request, exc: ProviderError) -> JSONRe
     headers = {}
     if exc.retry_after is not None:
         headers["Retry-After"] = str(max(1, round(exc.retry_after)))
+    payload = error_payload(exc)
     return JSONResponse(
-        status_code=_PROVIDER_ERROR_STATUS.get(exc.kind, 502),
-        content={"detail": str(exc), "kind": exc.kind},
+        status_code=payload["status"],
+        content={"detail": payload["detail"], "kind": exc.kind},
         headers=headers,
     )
 

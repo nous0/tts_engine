@@ -59,6 +59,7 @@ memory, so several workers can't see or cancel each other's jobs.
 | GET | `/v1/jobs/{id}/audio` | Download the finished podcast |
 | POST | `/v1/jobs/{id}/cancel` | Cancel a queued or running job (409 if already finished) |
 | GET | `/v1/voices` | List voices (`?provider=`, `?gender=female\|male`) |
+| WS | `/v1/speech/ws` | Real-time chatbot voice: send LLM tokens, get audio per sentence |
 | GET | `/health` | Liveness |
 
 ### Speech
@@ -90,6 +91,47 @@ long, so a long first sentence starts playing sooner. It's off by default becaus
 first sentence may sound slightly split. Measured on Kokoro/CPU, time to first audio
 went from 3.5 to 2.0 s for a 79-character first sentence, and from 5.2 to 3.0 s for a
 171-character one.
+
+### Real-time chatbot voice (WebSocket)
+
+`WS /v1/speech/ws` is for a chatbot that talks **while the LLM is still writing**. The
+client forwards LLM token deltas as they arrive. The server cuts them into sentences
+and sends back audio for each sentence right away, and the client can cancel speech at
+any time (barge-in).
+
+| Direction | Message |
+|---|---|
+| client → server | `{"type": "start", "provider"?, "voice"?, "speed"?, "fast_start"?: true, "cache"?: true}` (must be first) · `{"type": "text", "text": "..."}` (any size) · `{"type": "flush"}` (end of turn) · `{"type": "cancel"}` (stop speaking now) |
+| server → client | `{"type": "ready", "sample_rate": 24000, "channels": 1, "sample_width": 2, "format": "pcm", ...}` · `{"type": "sentence", "index", "turn", "chars", "cached"}` · **binary frames: raw PCM** (s16le, mono) · `{"type": "done", "turn"}` · `{"type": "cancelled"}` · `{"type": "error", "detail", "status", "kind"?, "turn"?}` |
+
+- Each turn ends with exactly one of `done`, `error` (with `turn`), or `cancelled`.
+  `cancelled` ends every pending turn.
+- A bad `start` (unknown provider or voice, malformed message) gets an `error` and the
+  connection closes with code 1008. Other bad messages get an `error`, and the session
+  keeps going.
+- `fast_start` is on by default here: each turn's first chunk may end at a comma, so audio
+  starts sooner. Sentences are cached like `/v1/speech/stream` (`"cache": false` to
+  skip).
+- Browser clients (which send an `Origin` header) are refused unless the origin is listed
+  in `WS_ALLOWED_ORIGINS`. Server-side clients are always allowed. A turn is capped at
+  `WS_MAX_TURN_CHARS` (default 10 000).
+
+Try it with the reference client, which sends a demo answer word by word, like an LLM:
+
+```bash
+uv run python examples/ws_client.py                      # prints a timeline, saves output/ws_client.wav
+uv run python examples/ws_client.py --cancel-after 3     # barge-in
+uv run python examples/ws_client.py --no-fast-start --no-cache
+```
+
+Measured on Kokoro/CPU, from the first sentence being fully sent to its audio arriving:
+
+| Setup | Delay |
+|---|---|
+| Without `fast_start` (108-char first sentence) | 4.99 s |
+| With `fast_start` (57-char first clause) | 2.29 s |
+| With `fast_start` (43-char first clause) | 1.44 s |
+| Cached | Audio already playing before the sentence was complete |
 
 ### Voices
 
@@ -180,7 +222,7 @@ All settings are listed in `.env.example`.
 ## Examples
 
 ```bash
-uv run python examples/chatbot_stream.py                                   # simulated LLM tokens -> streaming audio
+uv run python examples/ws_client.py                                         # fake LLM tokens -> WebSocket -> output/ws_client.wav
 uv run python examples/generate_podcast.py examples/script_trio.txt --provider kokoro   # 3 speakers (2 female, 1 male)
 uv run python examples/generate_podcast.py examples/script.json --provider kokoro   # -> output/script.wav
 ```

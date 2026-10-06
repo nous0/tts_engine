@@ -133,3 +133,18 @@ class VoicesResponse(BaseModel):
     default_provider: str
     providers: list[str] = Field(description="Registered (usable) providers.")
     voices: list[VoiceInfo]
+
+
+class WsStart(BaseModel):
+    """First message on WS /v1/speech/ws: how this session should speak."""
+
+    type: Literal["start"]
+    provider: str | None = Field(None, description="Provider name; falls back to default.")
+    voice: str | None = Field(None, description="Voice id; falls back to a default.")
+    speed: float = Field(1.0, ge=0.25, le=4.0)
+    instructions: str | None = Field(None, description="Style/tone hint, where supported.")
+    fast_start: bool = Field(
+        True, description="Let each turn's first chunk end at a comma for earlier audio."
+    )
+    cache: bool = Field(True, description="Serve cached sentences; false always synthesizes.")
+    max_sentence_length: int = Field(200, ge=20, le=2000)

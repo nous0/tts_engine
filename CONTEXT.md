@@ -103,6 +103,20 @@ Last checked: 2026-09-29.
   to make. Splitting chunks smaller lowers TTFA but can add stalls like this, unless the
   next chunk is at most about 1.5× the previous one's length (since RTF ≈ 0.65), or the
   client buffers a little before playing.
+- **After Phase 6 commit 3: WebSocket `/v1/speech/ws` works end to end with Kokoro**
+  (`examples/ws_client.py`, 15 words/s fake LLM). Measured from the first sentence
+  being fully sent to its first audio:
+  - no `fast_start`: 4.99 s;
+  - `fast_start`: 2.29 s (57-char first clause) or 1.44 s (43-char first clause);
+  - cached: audio started 0.5 s *before* the first sentence was even complete;
+  - barge-in: `cancelled` came back immediately, and the next sentence was never
+    spoken.
+
+  **Target ≤ 1.5 s is met only when the first clause is short (≲ 45 chars)**, because
+  Kokoro produces a sentence's audio in one piece (about 2.8 s for 57 chars on this CPU).
+  Options for later: a lower `clause_min_chars` (more stall risk), OpenAI for chat, or a
+  GPU. **Waiting for the user's test of commits 1–3 before commit 4 (Gradio demo) and
+  commit 5.**
 - **After Phase 6 commit 2** (same bench, median of 3):
   - `fast_start` on: TTFA medium 3.50 → **1.98 s**, long first sentence 5.23 → **2.97 s**,
     short and paragraph unchanged (no comma to split), and no new stalls.

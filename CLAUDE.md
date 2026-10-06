@@ -37,7 +37,7 @@ uv run python scripts/bench_latency.py           # streaming TTFA / RTF / stalls
 uv run ruff check .                              # lint (E,F,I,UP,B; line length 100)
 uv run ruff format .
 
-uv run python examples/chatbot_stream.py                      # streaming demo
+uv run python examples/ws_client.py                           # WebSocket client: fake LLM tokens -> audio
 uv run python examples/generate_podcast.py examples/script.json  # end-to-end podcast
 ```
 
@@ -72,8 +72,19 @@ Request flow: **route → `TTSEngine` → provider → (podcast only) audio pipe
   sentence. `flac` can't be streamed (400). The route awaits the first chunk before
   returning the 200, so early failures still get a real status. After that, errors are
   logged and the connection is dropped; never write error text into the audio stream.
-  `SentenceChunker` (for incremental text such as LLM tokens) is used on the client side,
-  in `examples/chatbot_stream.py`, not by the server.
+- **Real-time sessions** (`app/core/session.py`, route `app/api/routes/realtime.py`):
+  `SpeechSession` is transport-neutral. `feed()` pushes text through a server-side
+  `SentenceChunker`, whose complete sentences go on a queue for one speaker task. That
+  task synthesizes them in order via `engine.open_sentence` (so sentences are cached) and
+  emits `SentenceStarted`/`Audio`/`TurnDone`/`TurnFailed`/`Cancelled`.
+  - `cancel()` bumps a generation counter, drops queued work and unsent audio, and
+    cancels the in-flight sentence task. `aclosing` then closes the provider stream.
+  - Every turn ends with exactly one of done/failed/cancelled.
+  - The WS route only translates messages. Both the receiver and the event forwarder
+    send, so they share `send_lock`.
+  - Error payloads come from `app/api/errors.py:error_payload`, shared with the HTTP
+    handlers.
+  - Browser `Origin`s are refused unless listed in `WS_ALLOWED_ORIGINS`.
 - **Kokoro is synchronous and CPU-bound.** It runs on its own `ThreadPoolExecutor`
   (`KOKORO_MAX_CONCURRENCY`, default 1), not the default executor that the job store's
   SQLite calls use. `KPipeline` creation is behind a lock. `_aiter_blocking` bridges the
