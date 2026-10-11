@@ -1,24 +1,35 @@
-"""Render a multi-speaker script into one audio file.
+"""Render a multi-speaker script into one audio file, or write one from a topic first.
 
 Runs the podcast pipeline directly (no HTTP server needed):
 
     uv run python examples/generate_podcast.py examples/script.json
-    uv run python examples/generate_podcast.py examples/script.json --format wav
     uv run python examples/generate_podcast.py examples/script_trio.txt --format mp3 --title "Trio"
 
-The script may be JSON (a list of ``{"speaker": ..., "text": ...}`` objects) or
-plain text with ``Alice: ...`` lines. Speakers without an explicit voice are
-cast automatically by gender (guessed from the name, or set with --gender).
+From a topic, with a review step (the LLM writes the script, you edit it, then render):
+
+    uv run python examples/generate_podcast.py --topic "Why local TTS matters" --minutes 2 \\
+        --script-only          # -> output/why-local-tts-matters.script.json
+    uv run python examples/generate_podcast.py output/why-local-tts-matters.script.json --format mp3
+
+or in one go with ``--topic "..." --format mp3``. ``--writer fake`` writes a fixed
+dialogue without calling OpenAI.
+
+The script may be JSON (a list of ``{"speaker": ..., "text": ...}`` objects, or an
+object with ``turns`` plus optional ``genders`` and ``title``, as --topic writes it) or
+plain text with ``Alice: ...`` lines. Speakers without an explicit voice are cast
+automatically by gender (from the script, guessed from the name, or set with --gender).
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
+import json
+import re
 import time
 from pathlib import Path
 
-from app.config import get_settings
+from app.config import Settings, get_settings
 from app.core import audio
 from app.core import podcast as podcast_core
 from app.core.cache import FileCache
@@ -26,11 +37,35 @@ from app.core.engine import TTSEngine
 from app.core.podcast import PodcastSpec
 from app.core.providers.base import SynthOpts
 from app.core.providers.registry import build_registry
+from app.core.scriptwriter import Host, TopicBrief, build_writer
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Render a podcast script to audio.")
-    parser.add_argument("script", type=Path, help="Path to a .json or .txt script.")
+    parser.add_argument(
+        "script", type=Path, nargs="?", help="Path to a .json or .txt script (or use --topic)."
+    )
+    parser.add_argument("--topic", default=None, help="Have the LLM write the script first.")
+    parser.add_argument("--minutes", type=float, default=3.0, help="Target length for --topic.")
+    parser.add_argument(
+        "--host",
+        action="append",
+        default=[],
+        metavar="NAME[=female|male]",
+        help="A host for --topic; repeatable (default: the writer picks two).",
+    )
+    parser.add_argument("--style", default=None, help="Tone hints for --topic.")
+    parser.add_argument(
+        "--writer",
+        choices=["openai", "fake"],
+        default=None,
+        help="Script writer for --topic (default: SCRIPT_WRITER from config).",
+    )
+    parser.add_argument(
+        "--script-only",
+        action="store_true",
+        help="With --topic: save the script for review and stop before rendering.",
+    )
     parser.add_argument("--provider", default=None, help="Provider name (default: config).")
     parser.add_argument("--format", default="wav", help="Output format (default: wav).")
     parser.add_argument("--pause-ms", type=int, default=600, help="Silence between turns.")
@@ -62,6 +97,16 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def parse_host_flags(pairs: list[str]) -> list[Host]:
+    hosts = []
+    for pair in pairs:
+        name, _, gender = pair.partition("=")
+        if not name or gender not in ("", "female", "male"):
+            raise SystemExit(f"Invalid --host '{pair}'; expected NAME or NAME=female|male.")
+        hosts.append(Host(name, gender or None))
+    return hosts
+
+
 def parse_voice_flags(pairs: list[str]) -> dict[str, str]:
     voices: dict[str, str] = {}
     for pair in pairs:
@@ -82,9 +127,58 @@ def parse_gender_flags(pairs: list[str]) -> dict[str, str]:
     return genders
 
 
+def slug(text: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")[:40] or "episode"
+
+
+async def write_script(args: argparse.Namespace, settings: Settings) -> tuple[dict, Path]:
+    """Step 1: the LLM writes a script for ``--topic``; it is saved for review."""
+    if args.writer:
+        settings = settings.model_copy(update={"script_writer": args.writer})
+    writer = build_writer(settings)
+    if writer is None:
+        raise SystemExit("No script writer: set OPENAI_API_KEY, or pass --writer fake.")
+    brief = TopicBrief(args.topic, args.minutes, parse_host_flags(args.host), args.style)
+    print(f"Writing a {args.minutes:g}-minute script with {writer.label}...")
+    started = time.perf_counter()
+    script = await writer(brief)
+    body = script.to_request()
+    path = Path(settings.output_dir) / f"{slug(args.topic)}.script.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(body, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(
+        f"  {script.title!r}: {len(script.turns)} turns, about {script.estimated_minutes} min, "
+        f"written in {time.perf_counter() - started:.1f}s -> {path}"
+    )
+    for turn in script.turns[:4]:
+        print(f"  {turn.speaker}: {turn.text}")
+    return body, path
+
+
+def read_script(path: Path) -> dict:
+    """A script file as ``{"turns": ..., "genders"?, "title"?, "normalize_text"?}``."""
+    raw = path.read_text(encoding="utf-8")
+    data = json.loads(raw) if raw.lstrip()[:1] in ("[", "{") else raw
+    return data if isinstance(data, dict) else {"turns": data}
+
+
 async def main() -> None:
     args = parse_args()
+    if bool(args.script) == bool(args.topic):
+        raise SystemExit("Pass either a script file or --topic.")
     settings = get_settings()
+
+    if args.topic:
+        data, script_path = await write_script(args, settings)
+        if args.script_only:
+            print(f"\nReview and edit {script_path}, then render it with:")
+            print(f"  uv run python examples/generate_podcast.py {script_path} --format mp3")
+            return
+        name = script_path.name.removesuffix(".script.json")
+    else:
+        data = read_script(args.script)
+        name = args.script.name.removesuffix(".script.json").removesuffix(args.script.suffix)
+
     providers = build_registry(settings)
     if not providers:
         raise SystemExit(
@@ -105,13 +199,15 @@ async def main() -> None:
         cache=cache,
     )
 
-    turns = podcast_core.parse_script(args.script.read_text(encoding="utf-8"))
+    turns = podcast_core.parse_script(data)
+    if data.get("normalize_text"):
+        turns = podcast_core.normalize_turns(turns)
+    genders = {**(data.get("genders") or {}), **parse_gender_flags(args.gender)}
+    title = args.title or data.get("title")
     catalog = await engine.list_voices(args.provider)
-    voices = podcast_core.assign_voices(
-        turns, parse_voice_flags(args.voice), catalog, parse_gender_flags(args.gender)
-    )
+    voices = podcast_core.assign_voices(turns, parse_voice_flags(args.voice), catalog, genders)
 
-    print(f"Script: {len(turns)} turns, {len(voices)} speakers")
+    print(f"\nScript: {len(turns)} turns, {len(voices)} speakers")
     gender_of = {v.id: v.gender for v in catalog}
     for speaker, voice in voices.items():
         print(f"  {speaker:<12} -> {voice} ({gender_of.get(voice) or 'neutral'})")
@@ -128,7 +224,7 @@ async def main() -> None:
         target_lufs=(
             args.target_lufs if args.target_lufs is not None else settings.podcast_target_lufs
         ),
-        title=args.title,
+        title=title,
         sample_rate=settings.podcast_mp3_sample_rate if mp3 else None,
         bitrate=settings.podcast_mp3_bitrate if mp3 else None,
     )
@@ -145,7 +241,7 @@ async def main() -> None:
     print("\nRendering...")
     result = await podcast_core.render(spec, synthesize, on_progress)
 
-    out_path = args.out or Path(settings.output_dir) / f"{args.script.stem}.{args.format}"
+    out_path = args.out or Path(settings.output_dir) / f"{name}.{args.format}"
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_bytes(result.audio)
 

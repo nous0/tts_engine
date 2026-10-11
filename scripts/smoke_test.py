@@ -16,6 +16,9 @@ Restart recovery needs a server restart in the middle, so it is split in two ste
     # stop the server (Ctrl+C, or kill it), start it again, then:
     uv run python scripts/smoke_test.py --check-interrupted <job_id>
 
+The topic -> script -> podcast checks need a server started with SCRIPT_WRITER=fake
+(they are skipped otherwise); the mp3/loudness checks need ffmpeg on the server.
+
 Exits with status 1 if any check fails. OpenAI is never called, so no quota is used.
 The first request after a server start can take ~40 s while Kokoro loads.
 """
@@ -211,7 +214,94 @@ async def run_checks(client: httpx.AsyncClient, provider: str, skip_jobs: bool) 
     c.check("audio of a cancelled job -> 409", r.status_code == 409)
     r = await client.post("/v1/jobs/does-not-exist/cancel")
     c.check("cancel an unknown job -> 404", r.status_code == 404)
+
+    await run_podcast_checks(c, client, provider, cancelled_job=job2)
     return c
+
+
+SHORT_SCRIPT = "Alice: Welcome to the smoke test.\nBob: Thanks, it's short."
+
+
+async def run_podcast_checks(
+    c: Checks, client: httpx.AsyncClient, provider: str, cancelled_job: str
+) -> None:
+    """Phase 7: retry, mp3 + loudness, and topic -> script -> podcast."""
+    section("Retry")
+    r = await client.post(f"/v1/jobs/{cancelled_job}/retry")
+    c.check("retry a cancelled job -> 202", r.status_code == 202, f"got {r.status_code}")
+    if r.status_code == 202:
+        retried = r.json()["job_id"]
+        # The long script from the job checks; mostly cached by now.
+        status = await wait_for_status(client, retried, {"done", "error", "cancelled"}, 300)
+        job = (await client.get(f"/v1/jobs/{retried}")).json()
+        c.check("the retried job finishes", status == "done", f"{status}: {job['error']}")
+        c.check("it points back to the original", job["retry_of"] == cancelled_job)
+        r = await client.post(f"/v1/jobs/{retried}/retry")
+        c.check("retrying a done job -> 409", r.status_code == 409)
+    r = await client.post("/v1/jobs/does-not-exist/retry")
+    c.check("retry an unknown job -> 404", r.status_code == 404)
+
+    section("Podcast mp3 + loudness")
+    r = await client.post("/v1/podcast", json={
+        "script": SHORT_SCRIPT, "provider": provider, "format": "mp3",
+        "loudness": "lufs", "target_lufs": -19, "title": "Smoke test",
+    })
+    if r.status_code == 400 and "ffmpeg" in r.text:
+        c.skip("mp3 at -19 LUFS", "ffmpeg is not installed on the server")
+    else:
+        c.check("submit an mp3 podcast with loudness lufs -> 202", r.status_code == 202,
+                f"got {r.status_code}: {r.text[:200]}")
+        job_id = r.json()["job_id"]
+        status = await wait_for_status(client, job_id, {"done", "error", "cancelled"}, 300)
+        job = (await client.get(f"/v1/jobs/{job_id}")).json()
+        c.check("the mp3 job finishes", status == "done", f"{status}: {job['error']}")
+        loudness = job.get("loudness") or {}
+        output_i = loudness.get("output_i")
+        c.check("loudness is -19 +/- 1 LUFS", output_i is not None and abs(output_i + 19) <= 1,
+                f"{loudness}")
+        c.check("true peak stays under -1 dBTP", (loudness.get("output_tp") or 0) <= -1.0)
+        c.check("title and duration are reported",
+                job["title"] == "Smoke test" and (job["duration_s"] or 0) > 1)
+        r = await client.get(f"/v1/jobs/{job_id}/audio")
+        c.check("the audio is an mp3 with an ID3 tag",
+                r.headers.get("content-type") == "audio/mpeg" and r.content[:3] == b"ID3")
+
+    section("Topic -> script -> podcast")
+    writer = (await client.get("/health")).json().get("script_writer")
+    if writer != "fake":
+        c.skip("topic -> script -> podcast",
+               f"script writer is {writer!r}; start the server with SCRIPT_WRITER=fake "
+               "(this test never calls OpenAI)")
+        return
+    r = await client.post("/v1/podcast/script", json={
+        "topic": "the smoke test", "duration_min": 1,
+        "hosts": [{"name": "Lan", "gender": "female"}, {"name": "Minh", "gender": "male"}],
+    })
+    c.check("ask for a script -> 202", r.status_code == 202)
+    script_job = r.json()["job_id"]
+    status = await wait_for_status(client, script_job, {"done", "error"}, 60)
+    c.check("the script job finishes", status == "done")
+    r = await client.get(f"/v1/jobs/{script_job}/script")
+    script = r.json()
+    c.check("the script has turns and the hosts' genders",
+            r.status_code == 200 and script["genders"] == {"Lan": "female", "Minh": "male"}
+            and len(script["turns"]) > 2)
+    r = await client.get(f"/v1/jobs/{script_job}/audio")
+    c.check("a script job has no audio -> 404", r.status_code == 404)
+
+    script["turns"] = script["turns"][:3]  # the review step: keep the render short
+    r = await client.post("/v1/podcast", json={**script, "provider": provider, "format": "wav"})
+    c.check("the script posts to /v1/podcast as is -> 202", r.status_code == 202,
+            f"got {r.status_code}: {r.text[:200]}")
+    job_id = r.json()["job_id"]
+    status = await wait_for_status(client, job_id, {"done", "error", "cancelled"}, 300)
+    job = (await client.get(f"/v1/jobs/{job_id}")).json()
+    c.check("the episode renders", status == "done", f"{status}: {job['error']}")
+    voices = (await client.get(f"/v1/voices?provider={provider}")).json()["voices"]
+    gender_of = {v["id"]: v["gender"] for v in voices}
+    c.check("hosts are cast by the script's genders",
+            gender_of.get(job["voices"].get("Lan")) == "female"
+            and gender_of.get(job["voices"].get("Minh")) == "male", f"{job['voices']}")
 
 
 async def _turn(ws, text: str, timeout: float = 90) -> dict:
@@ -348,6 +438,16 @@ async def check_interrupted(client: httpx.AsyncClient, job_id: str) -> int:
         "restart" in (job["error"] or "") or "shutdown" in (job["error"] or "")
     )
     print(f"  [{'PASS' if ok else 'FAIL'}] job after restart: {job['status']} - {job['error']}")
+    if not ok:
+        return 1
+    r = await client.post(f"/v1/jobs/{job_id}/retry")
+    if r.status_code != 202:
+        print(f"  [FAIL] retry the interrupted job ({r.status_code}: {r.text[:200]})")
+        return 1
+    retried = r.json()["job_id"]
+    status = await wait_for_status(client, retried, {"done", "error", "cancelled"}, 300)
+    ok = status == "done"
+    print(f"  [{'PASS' if ok else 'FAIL'}] retry the interrupted job: {status}")
     return 0 if ok else 1
 
 

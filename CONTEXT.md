@@ -8,6 +8,20 @@ Last checked: 2026-10-11.
 
 ## Where things actually stand
 
+- **Phase 7 (complete podcast) finished on 2026-10-11**, in 5 commits:
+  - live job progress;
+  - mp3 via `libmp3lame` and −19 LUFS loudness;
+  - stored job specs and `POST /v1/jobs/{id}/retry`;
+  - LLM script writing from a topic (two steps, with review);
+  - CLI and smoke test.
+
+  **467 tests pass**, `ruff check .` is clean, and the smoke test passes 50/50. All of it
+  was checked live with Kokoro, ffmpeg and `gpt-4o-mini`; details are under Phase 7 in the
+  roadmap.
+- **Next:** Phase 9 (packaging: Dockerfile with ffmpeg, API key and CORS, CI) or the
+  per-sentence podcast rendering follow-up (it stops a Kokoro podcast from delaying the
+  chatbot).
+
 - **Phase 5 (local hardening) finished on 2026-09-28**, in 5 commits:
   - logging;
   - streaming fixes and Kokoro concurrency;
@@ -232,7 +246,7 @@ and (2) turns a topic or script into a finished multi-voice podcast.
 **Done when:** first audio within about 1.5 s of the LLM finishing its first sentence,
 no stutter for one listener, and barge-in works.
 
-### Phase 7: complete podcast (in progress, plan revised 2026-10-11)
+### Phase 7: complete podcast (done 2026-10-11; plan revised the same day)
 
 **Decisions (2026-10-11):**
 - Loudness target **−19 LUFS**, true peak −1.5 dBTP, configurable. The output is mono, and −16
@@ -289,7 +303,17 @@ no stutter for one listener, and barge-in works.
        0→12;
      - the mp3 measured −19.5 LUFS, −2.0 dBTP.
    - The 800 chars/min estimate held (1.8 min estimated, 1.8 min actual).
-5. CLI `--topic/--script-only`, smoke-test groups, and docs.
+5. **Done (2026-10-11).** CLI `--topic/--minutes/--host/--script-only/--writer`; a script
+   file keeps its genders and title when rendered.
+   - `smoke_test.py` adds Retry, mp3 + loudness, and Topic → script → podcast groups. The
+     topic group needs `SCRIPT_WRITER=fake` and still never calls OpenAI.
+   - `--check-interrupted` now also retries the interrupted job.
+   - **Smoke result: 50/50 pass**, and the restart + retry check passes. 467 unit tests pass.
+
+**Still open for the user:**
+- Listen to a full episode, e.g. `examples/script_trio.txt --format mp3`: check the level,
+  the gaps between turns, and the limiter on plosives.
+- Optionally render a topic script with the OpenAI TTS provider (uses quota).
 
 **Done when:** topic → LLM script → review/edit → mp3 at 44.1 kHz and −19 ±1 LUFS (checked with
 `ebur128`). Progress rises during the render. A failed or restart-interrupted job retries

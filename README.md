@@ -4,10 +4,16 @@ A Python/FastAPI backend that wraps TTS providers behind one API. It targets two
 consumers: **chatbot** (low-latency streaming speech) and **podcast** (long-form,
 multi-speaker audio files rendered as background jobs).
 
-**Status:** Phases 1–5 done: Kokoro + OpenAI providers, `GET /v1/voices`, gender-aware
-podcast casting, and the Phase 5 hardening for local use (timeouts and clear errors, a
-real job queue with cancel and restart recovery, an on-disk audio cache, and
-request-scoped logging). See `CONTEXT.md` for what's next.
+**Status:** Phases 1–7 are done.
+- **Providers and casting:** Kokoro and OpenAI, `GET /v1/voices`, and gender-aware podcast
+  casting.
+- **Local hardening:** clear timeouts and errors, a job queue with cancel, restart recovery
+  and retry, an on-disk audio cache, and request-scoped logging.
+- **Real-time chatbot speech:** a WebSocket endpoint with adaptive chunking and barge-in.
+- **Complete podcasts:** a topic becomes an LLM-written script, which you review and edit,
+  then a −19 LUFS mp3.
+
+See `CONTEXT.md` for what's next.
 
 ## Providers
 
@@ -338,6 +344,11 @@ uv run python examples/ws_client.py                                         # fa
 uv run python examples/voice_chat_ui.py                                     # voice chat in the browser (demo extra)
 uv run python examples/generate_podcast.py examples/script_trio.txt --provider kokoro   # 3 speakers (2 female, 1 male)
 uv run python examples/generate_podcast.py examples/script.json --provider kokoro   # -> output/script.wav
+
+# Topic -> LLM script -> review -> mp3 (--writer fake for no OpenAI call)
+uv run python examples/generate_podcast.py --topic "Why local TTS matters" --minutes 2 --script-only
+uv run python examples/generate_podcast.py output/why-local-tts-matters.script.json --format mp3
+uv run python examples/generate_podcast.py --topic "Backyard beekeeping" --host Lan=female --host Minh=male --format mp3
 ```
 
 ## Test
@@ -351,8 +362,8 @@ End-to-end smoke test against a running server, with real Kokoro and no OpenAI c
 It exits 1 if any check fails:
 
 ```bash
-uv run uvicorn app.main:app --port 8000          # terminal 1
-uv run python scripts/smoke_test.py              # terminal 2: 32 checks, about 1.5 minutes
+SCRIPT_WRITER=fake uv run uvicorn app.main:app --port 8000   # terminal 1 (fake writer: no OpenAI)
+uv run python scripts/smoke_test.py              # terminal 2: 50 checks, about 2 minutes
 uv run python scripts/smoke_test.py --skip-jobs  # without the job queue/cancel checks
 uv run python scripts/bench_latency.py           # streaming latency: TTFA, RTF, stalls
 uv run python scripts/bench_latency.py --mode ws --chunking all --wps 5,15,40   # chatbot view

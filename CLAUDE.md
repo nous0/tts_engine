@@ -31,7 +31,8 @@ uv run pytest tests/test_podcast.py              # one file
 uv run pytest tests/test_chunker.py::test_name   # one test
 uv run pytest -k kokoro                          # by keyword
 
-uv run python scripts/smoke_test.py              # E2E against a running server (real Kokoro), 32 checks incl. WebSocket
+uv run python scripts/smoke_test.py              # E2E against a running server (real Kokoro), 50 checks incl. WebSocket,
+                                                 # retry, mp3/LUFS; start the server with SCRIPT_WRITER=fake for the topic group
 uv run python scripts/bench_latency.py           # streaming TTFA / RTF / stalls against a server
 
 uv run ruff check .                              # lint (E,F,I,UP,B; line length 100)
@@ -40,6 +41,7 @@ uv run ruff format .
 uv run python examples/ws_client.py                           # WebSocket client: fake LLM tokens -> audio
 uv run python examples/voice_chat_ui.py                       # Gradio voice chat demo (extra: demo)
 uv run python examples/generate_podcast.py examples/script.json  # end-to-end podcast
+uv run python examples/generate_podcast.py --topic "..." --minutes 2 --script-only  # LLM script for review (--writer fake)
 ```
 
 Config comes from `.env` through pydantic-settings (`app/config.py`; see `.env.example`).
