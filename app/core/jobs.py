@@ -8,6 +8,11 @@ list unchanged.
 
 Jobs really queue: at most ``max_concurrent`` run at once (default 1, since a local
 Kokoro render already uses every core); the rest stay ``queued`` until a slot frees.
+``kind_limits`` gives a kind its own pool instead (script writing is network-bound, so
+it shouldn't wait behind a render).
+
+Each job keeps the input it was started from (``spec``, a JSON column read only by
+``get_spec``), so a failed or interrupted job can be retried, even after a restart.
 On startup, jobs left ``queued``/``running`` by a previous process are marked as
 errors, and finished jobs older than the retention period are deleted with their
 files, at startup and then hourly.
@@ -46,10 +51,19 @@ CREATE TABLE IF NOT EXISTS jobs (
     total        INTEGER NOT NULL DEFAULT 0,
     result_path  TEXT,
     error        TEXT,
-    meta         TEXT
+    meta         TEXT,
+    spec         TEXT
 );
 """
 
+# Columns added after the first release, created on older databases at connect().
+_ADDED_COLUMNS = {"spec": "TEXT"}
+
+
+# Everything but ``spec``, which can be large and is only read by ``get_spec``.
+_JOB_COLUMNS = (
+    "id, kind, status, created_at, updated_at, progress, total, result_path, error, meta"
+)
 
 log = logging.getLogger("app.jobs")
 
@@ -111,11 +125,19 @@ class Job:
 class JobStore:
     """SQLite-backed job records plus an in-process asyncio worker."""
 
-    def __init__(self, db_path: str | Path, max_concurrent: int = 1) -> None:
+    def __init__(
+        self,
+        db_path: str | Path,
+        max_concurrent: int = 1,
+        kind_limits: dict[str, int] | None = None,
+    ) -> None:
         self._db_path = Path(db_path)
         self._conn: sqlite3.Connection | None = None
         self._lock = asyncio.Lock()
         self._slots = asyncio.Semaphore(max(1, max_concurrent))
+        self._kind_slots = {
+            kind: asyncio.Semaphore(max(1, limit)) for kind, limit in (kind_limits or {}).items()
+        }
         self._tasks: dict[str, asyncio.Task] = {}
         self._user_cancelled: set[str] = set()
         self._maintenance: asyncio.Task | None = None
@@ -128,6 +150,10 @@ class JobStore:
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode=WAL")
         conn.executescript(_SCHEMA)
+        existing = {row["name"] for row in conn.execute("PRAGMA table_info(jobs)")}
+        for column, sql_type in _ADDED_COLUMNS.items():
+            if column not in existing:
+                conn.execute(f"ALTER TABLE jobs ADD COLUMN {column} {sql_type}")
         conn.commit()
         self._conn = conn
 
@@ -147,7 +173,13 @@ class JobStore:
                 self._conn.close()
                 self._conn = None
 
-    async def create(self, kind: str, total: int = 0, meta: dict | None = None) -> Job:
+    async def create(
+        self,
+        kind: str,
+        total: int = 0,
+        meta: dict | None = None,
+        spec: dict | None = None,
+    ) -> Job:
         now = time.time()
         job = Job(
             id=uuid.uuid4().hex,
@@ -163,21 +195,30 @@ class JobStore:
         )
         await self._execute(
             "INSERT INTO jobs (id, kind, status, created_at, updated_at, progress,"
-            " total, result_path, error, meta) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            " total, result_path, error, meta, spec) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
             (
                 job.id, job.kind, job.status.value, job.created_at, job.updated_at,
                 job.progress, job.total, None, None, json.dumps(job.meta),
+                json.dumps(spec) if spec is not None else None,
             ),
         )
         return job
 
     async def get(self, job_id: str) -> Job | None:
-        rows = await self._query("SELECT * FROM jobs WHERE id = ?", (job_id,))
+        rows = await self._query(f"SELECT {_JOB_COLUMNS} FROM jobs WHERE id = ?", (job_id,))
         return Job.from_row(rows[0]) if rows else None
+
+    async def get_spec(self, job_id: str) -> dict | None:
+        """The input a job was started from, or None (unknown job, or created before
+        specs were stored)."""
+        rows = await self._query("SELECT spec FROM jobs WHERE id = ?", (job_id,))
+        if not rows or rows[0]["spec"] is None:
+            return None
+        return json.loads(rows[0]["spec"])
 
     async def list(self, limit: int = 50) -> list[Job]:
         rows = await self._query(
-            "SELECT * FROM jobs ORDER BY created_at DESC LIMIT ?", (limit,)
+            f"SELECT {_JOB_COLUMNS} FROM jobs ORDER BY created_at DESC LIMIT ?", (limit,)
         )
         return [Job.from_row(r) for r in rows]
 
@@ -200,15 +241,19 @@ class JobStore:
             f"UPDATE jobs SET {assignments} WHERE id = ?", (*fields.values(), job_id)
         )
 
-    def spawn(self, job_id: str, work: Callable[[], Awaitable[None]]) -> None:
+    def spawn(
+        self, job_id: str, work: Callable[[], Awaitable[None]], kind: str | None = None
+    ) -> None:
         """Queue ``work`` to run in the background, recording the outcome on the job.
 
-        The job stays ``queued`` until one of the ``max_concurrent`` slots frees up.
+        The job stays ``queued`` until one of the ``max_concurrent`` slots frees up (or
+        one of its kind's own slots, if ``kind_limits`` has an entry for ``kind``).
         """
+        slots = self._kind_slots.get(kind or "", self._slots)
 
         async def runner() -> None:
             try:
-                async with self._slots:
+                async with slots:
                     await self.update(job_id, status=JobStatus.RUNNING)
                     await work()
             except asyncio.CancelledError:

@@ -270,9 +270,14 @@ no stutter for one listener, and barge-in works.
 
    - **Final `trio.mp3`:** 44.1 kHz mono 64 kbps, titled; `ebur128` measures −19.3 LUFS,
      −2.2 dBTP.
-3. Store each job's spec in a new `spec` column (lightweight migration).
-   - `POST /v1/jobs/{id}/retry` creates a new job (`retry_of`) from `error`/`cancelled`.
+3. **Done (2026-10-11).** Each job stores its spec in a new `spec` column (lightweight
+   migration).
+   - `POST /v1/jobs/{id}/retry` creates a new job (`retry_of`) from an `error` or
+     `cancelled` job (409 / 404 / 410 otherwise).
    - Per-kind job limits, so script jobs don't wait behind renders.
+   - **Checked live** with Kokoro and mp3: the server was hard-killed at 3/8 turns, and after
+     the restart the job was `error` ("Interrupted by a server restart"). The retry finished
+     with **3 cache hits and 5 syntheses**, at −19.05 LUFS and −1.97 dBTP.
 4. `app/core/scriptwriter.py` (OpenAI structured output, plus a fake writer).
    - `POST /v1/podcast/script` creates a `script` job.
    - `GET /v1/jobs/{id}/script` returns a body that can be posted to `/v1/podcast` as is.

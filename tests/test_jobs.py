@@ -311,3 +311,70 @@ async def test_close_waits_for_an_in_flight_query_of_a_cancelled_task(tmp_path):
     await s.close()
 
     assert slow.closed_during_query is False
+
+
+async def test_spec_is_stored_and_read_separately(store):
+    spec = {"turns": [{"speaker": "A", "text": "Hi."}], "format": "mp3"}
+    job = await store.create("podcast", total=1, meta={"format": "mp3"}, spec=spec)
+    assert await store.get_spec(job.id) == spec
+    # The job record itself doesn't carry the (possibly large) spec.
+    assert (await store.get(job.id)).meta == {"format": "mp3"}
+    assert [j.id for j in await store.list()] == [job.id]
+
+
+async def test_get_spec_is_none_without_one(store):
+    job = await store.create("podcast")
+    assert await store.get_spec(job.id) is None
+    assert await store.get_spec("does-not-exist") is None
+
+
+async def test_connect_adds_the_spec_column_to_an_older_database(tmp_path):
+    import sqlite3
+
+    db = tmp_path / "old.db"
+    conn = sqlite3.connect(db)
+    conn.executescript(
+        """
+        CREATE TABLE jobs (
+            id TEXT PRIMARY KEY, kind TEXT NOT NULL, status TEXT NOT NULL,
+            created_at REAL NOT NULL, updated_at REAL NOT NULL,
+            progress INTEGER NOT NULL DEFAULT 0, total INTEGER NOT NULL DEFAULT 0,
+            result_path TEXT, error TEXT, meta TEXT
+        );
+        INSERT INTO jobs VALUES ('old1', 'podcast', 'error', 1, 1, 0, 2, NULL, 'x', '{}');
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    s = JobStore(db)
+    await s.connect()
+    try:
+        assert (await s.get("old1")).status is JobStatus.ERROR
+        assert await s.get_spec("old1") is None
+        job = await s.create("podcast", spec={"turns": []})
+        assert await s.get_spec(job.id) == {"turns": []}
+    finally:
+        await s.close()
+    # Connecting again doesn't try to add the column twice.
+    s = JobStore(db)
+    await s.connect()
+    await s.close()
+
+
+async def test_a_kind_with_its_own_limit_does_not_wait_behind_renders(tmp_path):
+    s = JobStore(tmp_path / "jobs.db", max_concurrent=1, kind_limits={"script": 2})
+    await s.connect()
+    try:
+        render, script = await s.create("podcast"), await s.create("script")
+        render_started, script_started, release = (
+            asyncio.Event(), asyncio.Event(), asyncio.Event()
+        )
+        s.spawn(render.id, _blocking_work(render_started, release), kind="podcast")
+        await asyncio.wait_for(render_started.wait(), timeout=5)
+        s.spawn(script.id, _blocking_work(script_started, release), kind="script")
+        await asyncio.wait_for(script_started.wait(), timeout=5)
+        assert (await s.get(script.id)).status is JobStatus.RUNNING
+        release.set()
+    finally:
+        await s.close()

@@ -140,6 +140,7 @@ class JobResponse(BaseModel):
     )
     title: str | None = None
     duration_s: float | None = Field(None, description="Episode length, once rendered.")
+    retry_of: str | None = Field(None, description="The job this one retries, if any.")
     loudness: dict[str, Any] | None = Field(
         None,
         description="loudnorm measurements (input/output LUFS and true peak, and whether "

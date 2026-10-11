@@ -790,3 +790,154 @@ def test_podcast_rejects_an_out_of_range_target():
     with TestClient(app) as client:
         resp = client.post("/v1/podcast", json={"script": "Alice: Hi.", "target_lufs": -5})
     assert resp.status_code == 422
+
+
+class FlakyProvider(FakeProvider):
+    """Fails the first time it is asked for a given text; counts every call."""
+
+    def __init__(self, fail_on: str) -> None:
+        self.fail_on = fail_on
+        self.failed = False
+        self.texts: list[str] = []
+
+    async def synthesize(self, text: str, voice: str, opts: SynthOpts) -> bytes:
+        self.texts.append(text)
+        if self.fail_on in text and not self.failed:
+            self.failed = True
+            raise ProviderError(self.name, "upstream hiccup", kind="upstream")
+        return tone(50)
+
+
+def _install_with_cache(provider, tmp_path) -> None:
+    from app.core.cache import FileCache
+
+    app.state.engine = TTSEngine(
+        {"fake": provider},
+        default_provider="fake",
+        default_voice="fake-1",
+        cache=FileCache(tmp_path / "cache", 50 * 1024 * 1024),
+    )
+
+
+def test_retry_renders_a_failed_job_again_reusing_cached_turns(tmp_path):
+    provider = FlakyProvider(fail_on="Second")
+    with TestClient(app) as client:
+        _install_with_cache(provider, tmp_path)
+        script = "Alice: First line.\nBob: Second line.\nAlice: Third line."
+        failed_id = client.post(
+            "/v1/podcast", json={"script": script, "format": "wav", "title": "Ep"}
+        ).json()["job_id"]
+        failed = _await_job(client, failed_id)
+        assert failed["status"] == "error"
+        assert "upstream hiccup" in failed["error"]
+
+        resp = client.post(f"/v1/jobs/{failed_id}/retry")
+        assert resp.status_code == 202
+        retried_id = resp.json()["job_id"]
+        assert retried_id != failed_id
+        retried = _await_job(client, retried_id)
+
+        assert client.get(f"/v1/jobs/{failed_id}").json()["status"] == "error"  # untouched
+    assert retried["status"] == "done", retried
+    assert retried["retry_of"] == failed_id
+    assert retried["title"] == "Ep"
+    assert retried["voices"] == failed["voices"]
+    # First job: Alice (ok, cached), Bob (failed). Retry: Alice from the cache, then
+    # Bob and the last line.
+    assert provider.texts == ["First line.", "Second line.", "Second line.", "Third line."]
+
+
+def test_retry_a_cancelled_job():
+    provider = BlockingProvider()
+    with TestClient(app) as client:
+        app.state.engine = TTSEngine(
+            {"fake": provider}, default_provider="fake", default_voice="fake-1"
+        )
+        job_id = client.post(
+            "/v1/podcast", json={"script": "Alice: Hi.", "format": "pcm"}
+        ).json()["job_id"]
+        assert provider.started.wait(timeout=5)
+        assert client.post(f"/v1/jobs/{job_id}/cancel").json()["status"] == "cancelled"
+
+        _install_fake_engine()
+        resp = client.post(f"/v1/jobs/{job_id}/retry")
+        assert resp.status_code == 202
+        assert _await_job(client, resp.json()["job_id"])["status"] == "done"
+
+
+def test_retry_a_job_interrupted_by_a_restart():
+    with TestClient(app) as client:
+        _install_fake_engine()
+        jobs = app.state.jobs
+        spec = {
+            "turns": [{"speaker": "Alice", "text": "Hi."}],
+            "voices": {"Alice": "fake-1"},
+            "format": "pcm",
+            "loudness": "off",
+        }
+
+        async def leave_running() -> str:
+            job = await jobs.create("podcast", total=1, meta={}, spec=spec)
+            await jobs.update(job.id, status="running")
+            await jobs.recover_stale()  # what the next server start does
+            return job.id
+
+        job_id = client.portal.call(leave_running)
+        interrupted = client.get(f"/v1/jobs/{job_id}").json()
+        assert "restart" in interrupted["error"]
+
+        resp = client.post(f"/v1/jobs/{job_id}/retry")
+        assert resp.status_code == 202
+        assert _await_job(client, resp.json()["job_id"])["status"] == "done"
+
+
+def test_retry_refuses_jobs_that_are_not_failed_or_cancelled():
+    with TestClient(app) as client:
+        _install_fake_engine()
+        job_id = client.post(
+            "/v1/podcast", json={"script": "Alice: Hi.", "format": "pcm"}
+        ).json()["job_id"]
+        assert _await_job(client, job_id)["status"] == "done"
+        resp = client.post(f"/v1/jobs/{job_id}/retry")
+    assert resp.status_code == 409
+    assert "only failed or cancelled" in resp.json()["detail"]
+
+
+def test_retry_unknown_job_returns_404():
+    with TestClient(app) as client:
+        resp = client.post("/v1/jobs/nope/retry")
+    assert resp.status_code == 404
+
+
+def test_retry_a_job_without_a_stored_spec_returns_410():
+    with TestClient(app) as client:
+        jobs = app.state.jobs
+
+        async def legacy_failed_job() -> str:
+            job = await jobs.create("podcast", total=1)
+            await jobs.update(job.id, status="error", error="boom")
+            return job.id
+
+        job_id = client.portal.call(legacy_failed_job)
+        resp = client.post(f"/v1/jobs/{job_id}/retry")
+    assert resp.status_code == 410
+
+
+def test_retry_checks_voices_again():
+    with TestClient(app) as client:
+        _install_erroring("upstream")
+        job_id = client.post(
+            "/v1/podcast",
+            json={"script": "Alice: Hi.", "format": "pcm", "voices": {"Alice": "fake-2"}},
+        ).json()["job_id"]
+        assert _await_job(client, job_id)["status"] == "error"
+
+        # The provider now offers other voices: the stored one is gone.
+        app.state.engine = TTSEngine(
+            {"erroring": RecordingProvider("erroring", ["other-voice"])},
+            default_provider="erroring",
+            default_voice="other-voice",
+        )
+        resp = client.post(f"/v1/jobs/{job_id}/retry")
+    assert resp.status_code == 400
+    assert "Unknown voice 'fake-2'" in resp.json()["detail"]

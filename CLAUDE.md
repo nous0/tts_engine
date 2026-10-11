@@ -193,6 +193,12 @@ Request flow: **route → `TTSEngine` → provider → (podcast only) audio pipe
   `output_dir`.
   - `cancel` records `cancelled` for a user cancel and `error` for a shutdown.
   - `recover_stale` (at startup) fails jobs left `queued`/`running` by a previous process.
+  - Each job stores its input in the `spec` column, added to older databases by a small
+    migration in `connect()`. Only `get_spec` reads it, never `get`/`list`, because it can be
+    large. `POST /v1/jobs/{id}/retry` rebuilds a `PodcastSpec.from_dict` from it, runs
+    `_check_spec` again, and starts a new job with `meta.retry_of`.
+  - `kind_limits` gives a job kind its own semaphore, for example so script writing
+    doesn't queue behind a render. `spawn(..., kind=)` picks it.
   - `start_maintenance` deletes old finished jobs and their files hourly.
   - **Single-process assumption:** don't run uvicorn with `--workers N`.
   - Every SQLite call goes through `_in_thread`, which keeps the lock until the thread

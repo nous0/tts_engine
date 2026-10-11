@@ -19,7 +19,7 @@ import inspect
 import json
 import re
 from collections.abc import Awaitable, Callable, Sequence
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, fields, replace
 from typing import Any, Literal
 
 from . import audio
@@ -79,6 +79,19 @@ class PodcastSpec:
     # Compressed output only (mp3 etc.): resample and bitrate; wav/pcm stay 24 kHz.
     sample_rate: int | None = None
     bitrate: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        """Plain JSON-able data, stored with the job so it can be retried later."""
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> PodcastSpec:
+        """Rebuild a spec saved by ``to_dict``; keys this version doesn't know are ignored."""
+        known = {f.name for f in fields(cls)}
+        values = {k: v for k, v in data.items() if k in known and k != "turns"}
+        turn_keys = {f.name for f in fields(Turn)}
+        turns = [Turn(**{k: v for k, v in t.items() if k in turn_keys}) for t in data["turns"]]
+        return cls(turns=turns, **values)
 
 
 @dataclass(slots=True)

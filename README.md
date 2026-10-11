@@ -60,6 +60,7 @@ memory, so several workers can't see or cancel each other's jobs.
 | GET | `/v1/jobs/{id}` | Job status and progress (`audio_url` when done) |
 | GET | `/v1/jobs/{id}/audio` | Download the finished podcast |
 | POST | `/v1/jobs/{id}/cancel` | Cancel a queued or running job (409 if already finished) |
+| POST | `/v1/jobs/{id}/retry` | Re-run a failed or cancelled job as a new job (`retry_of`); cached turns are reused |
 | GET | `/v1/voices` | List voices (`?provider=`, `?gender=female\|male`) |
 | WS | `/v1/speech/ws` | Real-time chatbot voice: send LLM tokens, get audio per sentence |
 | GET | `/health` | Liveness |
@@ -254,6 +255,13 @@ mixed into the audio.
   follow-up.
 - **Restarts:** jobs a crashed or killed server left `queued`/`running` are marked
   `error` ("Interrupted by a server restart") on the next start.
+- **Retry:** each job stores its input, so `POST /v1/jobs/{id}/retry` can re-run a failed,
+  cancelled or interrupted job, even after a restart. It returns 202 with a new job id,
+  and the old record is kept as it was. Voices and ffmpeg are checked again (400 if no
+  longer valid). Errors: 409 for jobs that are queued, running or done; 410 for jobs from
+  before inputs were stored. Turns rendered before the failure come from the audio cache.
+  Checked by killing the server after 3 of 8 turns: the retry reused those 3 and
+  synthesized 5.
 - **Cleanup:** finished jobs and their audio are deleted after `JOBS_RETENTION_DAYS`
   (default 7; 0 keeps everything), at startup and hourly. Only job files inside
   `OUTPUT_DIR` are removed.
