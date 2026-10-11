@@ -159,7 +159,10 @@ def read_script(path: Path) -> dict:
     """A script file as ``{"turns": ..., "genders"?, "title"?, "normalize_text"?}``."""
     raw = path.read_text(encoding="utf-8")
     data = json.loads(raw) if raw.lstrip()[:1] in ("[", "{") else raw
-    return data if isinstance(data, dict) else {"turns": data}
+    if isinstance(data, dict):
+        return data
+    # A plain "Alice: ..." transcript or a JSON list: parse it into turns here.
+    return {"turns": podcast_core.parse_script(data)}
 
 
 async def main() -> None:
