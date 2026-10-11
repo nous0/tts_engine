@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from functools import lru_cache
+from typing import Literal
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -45,6 +46,16 @@ class Settings(BaseSettings):
     # mp3 episodes: bitrate and sample rate (podcast platforms expect 44.1 kHz).
     podcast_mp3_bitrate: str = Field("64k", pattern=r"^\d{2,3}k$")
     podcast_mp3_sample_rate: int = Field(44100, ge=8000, le=48000)
+    # Podcast scripts from a topic (POST /v1/podcast/script). auto: OpenAI when a key is
+    # set, else off; fake: a fixed dialogue (tests, smoke test); off: disabled.
+    script_writer: Literal["auto", "openai", "fake", "off"] = "auto"
+    script_model: str = "gpt-4o-mini"
+    # Writing a long script takes a while; this is per attempt (the SDK retries).
+    script_timeout: float = Field(120.0, gt=0)
+    # Longer turns are split at sentences (OpenAI TTS takes at most 4096 characters).
+    script_max_turn_chars: int = Field(1500, ge=200, le=4000)
+    # Script jobs that may run at once, apart from renders (they only wait on the LLM).
+    max_concurrent_script_jobs: int = Field(4, ge=1, le=16)
     # Podcast renders that may run at once; the rest wait as "queued".
     max_concurrent_jobs: int = Field(1, ge=1, le=8)
     # Finished jobs (and their audio files) older than this are deleted; 0 keeps all.

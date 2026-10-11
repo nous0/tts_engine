@@ -187,6 +187,24 @@ Request flow: **route → `TTSEngine` → provider → (podcast only) audio pipe
   async; the route's async callback writes `progress` to the job store at most once a second.
   You can override provider, voice, and instructions per turn. `normalize_turns` (request
   `normalize_text`) runs `normalize_for_speech` on each turn.
+- **Script writing** (`app/core/scriptwriter.py`): this is step 1 of topic → episode.
+  - A writer is an `async (TopicBrief) -> Script` callable stored on `app.state.writer`
+    (`build_writer`; `SCRIPT_WRITER=auto|openai|fake|off`).
+  - `OpenAIScriptWriter` uses chat completions with a strict `json_schema` (title, speakers
+    with gender, turns). `max_tokens` comes from `duration_min × CHARS_PER_MINUTE`
+    (800, measured on Kokoro).
+  - Errors go through `providers/openai.py:translate_openai_error`, which the TTS provider
+    also uses.
+  - `finalize` (used by every writer):
+    - rejects speakers that weren't listed;
+    - runs `normalize_for_speech`;
+    - splits turns over `SCRIPT_MAX_TURN_CHARS` with `SentenceChunker` pull mode
+      (whole sentences).
+  - Routes: `POST /v1/podcast/script` creates a `script` job, which runs in its own pool
+    (`kind_limits`) and writes `output/script_<id>.json` as its `result_path`.
+    `GET /v1/jobs/{id}/script` returns it, and the body is valid for `POST /v1/podcast` as
+    is.
+  - Tests set `app.state.writer` directly (fake or a stub), like they set the engine.
 - **Jobs** (`app/core/jobs.py`): a SQLite job store that uses the stdlib `sqlite3` from
   worker threads (not aiosqlite). `JobStore.spawn` queues the render as an in-process
   asyncio task behind a semaphore (`MAX_CONCURRENT_JOBS`), and results are written to

@@ -55,6 +55,8 @@ memory, so several workers can't see or cancel each other's jobs.
 |---|---|---|
 | POST | `/v1/speech` | One-shot synthesis, returns an audio file |
 | POST | `/v1/speech/stream` | Chunked streaming, sentence-by-sentence |
+| POST | `/v1/podcast/script` | Have the LLM write a script about a topic (job; step 1 of 2) |
+| GET | `/v1/jobs/{id}/script` | The written script, ready to edit and post to `/v1/podcast` |
 | POST | `/v1/podcast` | Submit a multi-speaker script, returns `job_id` |
 | GET | `/v1/jobs` | List recent jobs |
 | GET | `/v1/jobs/{id}` | Job status and progress (`audio_url` when done) |
@@ -178,7 +180,35 @@ publishes no gender metadata, so its genders are perceived ones, and `alloy` is 
 
 ### Podcast
 
-Send either `turns` (`[{"speaker": "Alice", "text": "..."}]`) or a plain-text `script`
+**From a topic, in two steps:** the LLM writes a script, you review and edit it, then it
+is rendered.
+
+```bash
+curl -X POST http://127.0.0.1:8000/v1/podcast/script -H "Content-Type: application/json" \
+  -d "{\"topic\":\"Why local TTS matters for privacy\",\"duration_min\":3}"
+# poll GET /v1/jobs/<id> until done, then:
+curl http://127.0.0.1:8000/v1/jobs/<id>/script > script.json
+# edit script.json if you like, add "format": "mp3", and POST it to /v1/podcast
+```
+
+- **Request:**
+  - `duration_min` is 1–20 minutes, estimated at 800 characters per minute (Kokoro's
+    pace).
+  - `hosts` (`[{"name", "gender"}]`, up to 4) fixes the cast; by default the writer picks a
+    woman and a man.
+  - `style` adds tone hints.
+- **The script:** it gives every speaker's gender, so voices are cast correctly. Long turns
+  are split at sentences (`SCRIPT_MAX_TURN_CHARS`, 1500), and the text is made speakable.
+  The response is a valid `/v1/podcast` body (`title`, `turns`, `genders`,
+  `normalize_text`).
+- **The writer:** `SCRIPT_WRITER` is `auto` (OpenAI `SCRIPT_MODEL`, default `gpt-4o-mini`,
+  when a key is set), `fake` (a fixed dialogue, for tests) or `off`. `/health` shows which
+  one is active.
+- **Measured:** a 2-minute script took 7.6 s to write. It rendered as 107 s of audio in
+  67 s with Kokoro.
+- A failed script job can be retried like any job.
+
+**From your own script:** send either `turns` (`[{"speaker": "Alice", "text": "..."}]`) or a plain-text `script`
 (`Alice: ...` lines). `voices` (a speaker → voice map) is optional.
 
 Speakers you don't map are **cast automatically by gender**:

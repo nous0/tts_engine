@@ -115,6 +115,47 @@ class PodcastRequest(BaseModel):
         return self
 
 
+class ScriptHost(BaseModel):
+    """A host the script must use."""
+
+    name: str = Field(..., min_length=1, max_length=60)
+    gender: Gender | None = None
+
+
+class ScriptRequest(BaseModel):
+    """Ask the LLM for a podcast script about a topic (step 1 of 2).
+
+    The script comes back from ``GET /v1/jobs/{id}/script`` in the shape
+    ``POST /v1/podcast`` accepts, so it can be reviewed, edited, and sent on.
+    """
+
+    topic: str = Field(..., min_length=3, max_length=2000)
+    duration_min: float = Field(3.0, ge=1, le=20, description="Target length in minutes.")
+    hosts: list[ScriptHost] = Field(
+        default_factory=list,
+        max_length=4,
+        description="Hosts to use; by default the writer picks a woman and a man.",
+    )
+    style: str | None = Field(None, max_length=300, description="Tone or format hints.")
+
+    @model_validator(mode="after")
+    def _distinct_hosts(self) -> ScriptRequest:
+        names = [h.name.strip().lower() for h in self.hosts]
+        if len(names) != len(set(names)):
+            raise ValueError("Host names must be distinct.")
+        return self
+
+
+class ScriptResponse(BaseModel):
+    """A written script; post it (after any edits) to ``POST /v1/podcast``."""
+
+    title: str
+    turns: list[PodcastTurn]
+    genders: dict[str, Gender]
+    normalize_text: bool = True
+    estimated_minutes: float
+
+
 class PodcastJobResponse(BaseModel):
     """Returned when a podcast render is accepted."""
 
@@ -135,6 +176,7 @@ class JobResponse(BaseModel):
     total: int = Field(0, description="Total turns to render.")
     error: str | None = None
     audio_url: str | None = Field(None, description="Set once the render succeeds.")
+    script_url: str | None = Field(None, description="Set once a script job succeeds.")
     voices: dict[str, str] = Field(
         default_factory=dict, description="Resolved speaker -> voice map."
     )

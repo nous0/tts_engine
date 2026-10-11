@@ -278,10 +278,17 @@ no stutter for one listener, and barge-in works.
    - **Checked live** with Kokoro and mp3: the server was hard-killed at 3/8 turns, and after
      the restart the job was `error` ("Interrupted by a server restart"). The retry finished
      with **3 cache hits and 5 syntheses**, at −19.05 LUFS and −1.97 dBTP.
-4. `app/core/scriptwriter.py` (OpenAI structured output, plus a fake writer).
+4. **Done (2026-10-11).** `app/core/scriptwriter.py` (OpenAI structured output, plus a
+   fake writer).
    - `POST /v1/podcast/script` creates a `script` job.
    - `GET /v1/jobs/{id}/script` returns a body that can be posted to `/v1/podcast` as is.
    - Turns are capped at 1500 chars, split at whole sentences.
+   - **Checked live** (`gpt-4o-mini`, Kokoro, mp3, 2 minutes):
+     - writing the script took 7.6 s (12 turns, 1408 chars, Emily/Jake with genders);
+     - after one line was edited, the render took 67 s for 107 s of audio, with progress
+       0→12;
+     - the mp3 measured −19.5 LUFS, −2.0 dBTP.
+   - The 800 chars/min estimate held (1.8 min estimated, 1.8 min actual).
 5. CLI `--topic/--script-only`, smoke-test groups, and docs.
 
 **Done when:** topic → LLM script → review/edit → mp3 at 44.1 kHz and −19 ±1 LUFS (checked with

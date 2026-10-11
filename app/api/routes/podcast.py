@@ -1,14 +1,18 @@
-"""Podcast routes: submit a multi-speaker script, poll the job, fetch the audio.
+"""Podcast routes: write a script from a topic, render a script, poll and fetch jobs.
 
-Rendering a long script takes minutes, so ``POST /v1/podcast`` validates the
-request, registers a job and returns immediately with a ``job_id``. The render
-runs on an in-process worker and writes the finished file under the configured
-output directory.
+Both steps take a while, so they run as background jobs and return a ``job_id`` at
+once:
+
+1. ``POST /v1/podcast/script`` asks the LLM for a script about a topic; it is read
+   from ``GET /v1/jobs/{id}/script``, reviewed and edited by the user.
+2. ``POST /v1/podcast`` validates a script, then renders it on an in-process worker
+   into a file under the configured output directory.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import time
 import uuid
@@ -25,10 +29,13 @@ from app.core.engine import InvalidRequest, ProviderNotConfigured, TTSEngine
 from app.core.jobs import Job, JobNotActive, JobNotFound, JobStatus, JobStore
 from app.core.podcast import PodcastSpec, ScriptError, Turn
 from app.core.providers.base import ProviderError, SynthOpts, UnsupportedFormat
+from app.core.scriptwriter import Host, ScriptWriter, TopicBrief
 from app.models.schemas import (
     JobResponse,
     PodcastJobResponse,
     PodcastRequest,
+    ScriptRequest,
+    ScriptResponse,
 )
 
 router = APIRouter(prefix="/v1", tags=["podcast"])
@@ -56,6 +63,17 @@ def _jobs(request: Request) -> JobStore:
 
 def _output_dir(request: Request) -> Path:
     return Path(request.app.state.output_dir)
+
+
+def _writer(request: Request) -> ScriptWriter:
+    writer = getattr(request.app.state, "writer", None)
+    if writer is None:
+        raise HTTPException(
+            status_code=400,
+            detail="No script writer is configured: set OPENAI_API_KEY "
+            "(or SCRIPT_WRITER=fake for testing).",
+        )
+    return writer
 
 
 def _to_turns(req: PodcastRequest) -> list[Turn]:
@@ -109,6 +127,7 @@ async def _check_spec(engine: TTSEngine, spec: PodcastSpec) -> None:
 
 
 def _job_response(job: Job) -> JobResponse:
+    done = job.status is JobStatus.DONE
     return JobResponse(
         job_id=job.id,
         kind=job.kind,
@@ -118,7 +137,10 @@ def _job_response(job: Job) -> JobResponse:
         progress=job.progress,
         total=job.total,
         error=job.error,
-        audio_url=f"/v1/jobs/{job.id}/audio" if job.status is JobStatus.DONE else None,
+        audio_url=(
+            f"/v1/jobs/{job.id}/audio" if done and job.kind == "podcast" else None
+        ),
+        script_url=f"/v1/jobs/{job.id}/script" if done and job.kind == "script" else None,
         voices=job.meta.get("voices", {}),
         title=job.meta.get("title"),
         duration_s=job.meta.get("duration_s"),
@@ -183,6 +205,73 @@ async def _start_podcast(request: Request, spec: PodcastSpec, retry_of: str | No
     out_path = _output_dir(request) / f"podcast_{job.id}.{spec.format}"
     jobs.spawn(job.id, _renderer(jobs, _engine(request), job.id, spec, out_path, meta))
     return job
+
+
+@router.post("/podcast/script", status_code=202)
+async def create_script(req: ScriptRequest, request: Request) -> PodcastJobResponse:
+    """Step 1: have the LLM write a script about a topic, as a background job."""
+    brief = TopicBrief(
+        topic=req.topic.strip(),
+        duration_min=req.duration_min,
+        hosts=[Host(h.name.strip(), h.gender) for h in req.hosts],
+        style=req.style,
+    )
+    job = await _start_script(request, brief)
+    return PodcastJobResponse(
+        job_id=job.id, status=JobStatus.QUEUED.value, status_url=f"/v1/jobs/{job.id}"
+    )
+
+
+async def _start_script(request: Request, brief: TopicBrief, retry_of: str | None = None) -> Job:
+    writer = _writer(request)
+    jobs = _jobs(request)
+    meta: dict = {"topic": brief.topic[:200], "duration_min": brief.duration_min}
+    if retry_of:
+        meta["retry_of"] = retry_of
+    job = await jobs.create(kind="script", total=1, meta=meta, spec=brief.to_dict())
+    out_path = _output_dir(request) / f"script_{job.id}.json"
+
+    async def work() -> None:
+        try:
+            script = await writer(brief)
+        except ProviderError as exc:
+            await jobs.update(job.id, status=JobStatus.ERROR, error=str(exc))
+            return
+        body = script.to_request()
+        data = json.dumps(body, ensure_ascii=False, indent=2).encode("utf-8")
+        await asyncio.to_thread(_write_atomic, out_path, data)
+        await jobs.update(
+            job.id,
+            status=JobStatus.DONE,
+            progress=1,
+            result_path=str(out_path),
+            meta={
+                **meta,
+                "title": script.title,
+                "turns": len(script.turns),
+                "estimated_minutes": script.estimated_minutes,
+            },
+        )
+
+    jobs.spawn(job.id, work, kind="script")
+    return job
+
+
+@router.get("/jobs/{job_id}/script")
+async def get_job_script(job_id: str, request: Request) -> ScriptResponse:
+    """A written script, ready to edit and send to ``POST /v1/podcast``."""
+    job = await _jobs(request).get(job_id)
+    if job is None or job.kind != "script":
+        raise HTTPException(status_code=404, detail=f"Script job '{job_id}' not found.")
+    if job.status is not JobStatus.DONE or not job.result_path:
+        raise HTTPException(
+            status_code=409, detail=f"Job '{job_id}' is {job.status.value}, not done."
+        )
+    try:
+        body = json.loads(await asyncio.to_thread(Path(job.result_path).read_bytes))
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=410, detail="The script is no longer available.") from exc
+    return ScriptResponse(**body)
 
 
 def _renderer(
@@ -298,6 +387,11 @@ async def retry_job(job_id: str, request: Request) -> PodcastJobResponse:
             status_code=410,
             detail=f"Job '{job_id}' was created before inputs were stored; submit it again.",
         )
+    if job.kind == "script":
+        new_job = await _start_script(request, TopicBrief.from_dict(data), retry_of=job_id)
+        return PodcastJobResponse(
+            job_id=new_job.id, status=JobStatus.QUEUED.value, status_url=f"/v1/jobs/{new_job.id}"
+        )
     if job.kind != "podcast":
         raise HTTPException(status_code=400, detail=f"Jobs of kind '{job.kind}' can't be retried.")
 
@@ -323,6 +417,10 @@ async def get_job_audio(job_id: str, request: Request) -> Response:
     job = await _jobs(request).get(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail=f"Job '{job_id}' not found.")
+    if job.kind != "podcast":
+        raise HTTPException(
+            status_code=404, detail=f"Job '{job_id}' is a {job.kind} job and has no audio."
+        )
     if job.status is not JobStatus.DONE or not job.result_path:
         raise HTTPException(
             status_code=409, detail=f"Job '{job_id}' is {job.status.value}, not done."

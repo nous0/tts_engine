@@ -139,25 +139,32 @@ class OpenAIProvider:
         ]
 
     def _translate(self, exc: Exception) -> ProviderError:
-        """Map an SDK/httpx error to a ProviderError with the right ``kind``."""
-        kind: ProviderErrorKind = "upstream"
-        retry_after: float | None = None
-        if isinstance(exc, (openai.APITimeoutError, httpx.TimeoutException)):
-            kind = "timeout"
-        elif isinstance(exc, (openai.AuthenticationError, openai.PermissionDeniedError)):
-            kind = "auth"
-        elif isinstance(exc, openai.RateLimitError):
-            kind = "rate_limited"
-            retry_after = _retry_after(exc.response)
-        elif isinstance(
-            exc,
-            (openai.BadRequestError, openai.NotFoundError, openai.UnprocessableEntityError),
-        ):
-            kind = "bad_request"
-        message = getattr(exc, "message", None) or str(exc) or type(exc).__name__
-        err = ProviderError(self.name, message[:300], kind=kind, retry_after=retry_after)
-        log.warning("%s", err)
-        return err
+        return translate_openai_error(exc, self.name)
+
+
+def translate_openai_error(exc: Exception, name: str) -> ProviderError:
+    """Map an OpenAI SDK/httpx error to a ProviderError with the right ``kind``.
+
+    Shared by the TTS provider and the podcast script writer.
+    """
+    kind: ProviderErrorKind = "upstream"
+    retry_after: float | None = None
+    if isinstance(exc, (openai.APITimeoutError, httpx.TimeoutException)):
+        kind = "timeout"
+    elif isinstance(exc, (openai.AuthenticationError, openai.PermissionDeniedError)):
+        kind = "auth"
+    elif isinstance(exc, openai.RateLimitError):
+        kind = "rate_limited"
+        retry_after = _retry_after(exc.response)
+    elif isinstance(
+        exc,
+        (openai.BadRequestError, openai.NotFoundError, openai.UnprocessableEntityError),
+    ):
+        kind = "bad_request"
+    message = getattr(exc, "message", None) or str(exc) or type(exc).__name__
+    err = ProviderError(name, message[:300], kind=kind, retry_after=retry_after)
+    log.warning("%s", err)
+    return err
 
 
 def _retry_after(response: httpx.Response | None) -> float | None:

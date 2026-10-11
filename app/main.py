@@ -19,6 +19,7 @@ from app.core.engine import InvalidRequest, ProviderNotConfigured, TTSEngine
 from app.core.jobs import JobStore
 from app.core.providers.base import ProviderError, UnsupportedFormat
 from app.core.providers.registry import build_registry
+from app.core.scriptwriter import build_writer
 from app.logging_setup import configure_logging, new_request_id, request_id_var
 
 log = logging.getLogger("app.http")
@@ -41,6 +42,7 @@ async def lifespan(app: FastAPI):
         shape_audio=settings.stream_shape_audio,
     )
     app.state.engine = engine
+    app.state.writer = build_writer(settings)
 
     # Warm up local models in the background: startup isn't blocked, and the first
     # request doesn't pay the model load.
@@ -55,13 +57,20 @@ async def lifespan(app: FastAPI):
     output_dir.mkdir(parents=True, exist_ok=True)
     app.state.output_dir = output_dir
 
-    jobs = JobStore(settings.jobs_db, max_concurrent=settings.max_concurrent_jobs)
+    jobs = JobStore(
+        settings.jobs_db,
+        max_concurrent=settings.max_concurrent_jobs,
+        kind_limits={"script": settings.max_concurrent_script_jobs},
+    )
     await jobs.connect()
     await jobs.recover_stale()
     jobs.start_maintenance(settings.jobs_retention_days, output_dir)
     app.state.jobs = jobs
     logging.getLogger("app").info(
-        "started: providers=%s default=%s", sorted(providers), settings.default_provider
+        "started: providers=%s default=%s script_writer=%s",
+        sorted(providers),
+        settings.default_provider,
+        _writer_label(app.state.writer),
     )
     try:
         yield
@@ -128,11 +137,17 @@ async def health(request: Request) -> dict:
     """Liveness (always 200 while the process is up) plus provider readiness.
 
     ``providers`` maps each provider to ``ready``, or for Kokoro ``idle`` (model not
-    loaded yet), ``loading`` or ``error``.
+    loaded yet), ``loading`` or ``error``. ``script_writer`` says what writes podcast
+    scripts from a topic (``openai:<model>``, ``fake``, or ``off``).
     """
     engine: TTSEngine = request.app.state.engine
     return {
         "status": "ok",
         "default_provider": engine.default_provider,
         "providers": engine.provider_states(),
+        "script_writer": _writer_label(getattr(request.app.state, "writer", None)),
     }
+
+
+def _writer_label(writer) -> str:
+    return getattr(writer, "label", "custom") if writer is not None else "off"

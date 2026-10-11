@@ -941,3 +941,135 @@ def test_retry_checks_voices_again():
         resp = client.post(f"/v1/jobs/{job_id}/retry")
     assert resp.status_code == 400
     assert "Unknown voice 'fake-2'" in resp.json()["detail"]
+
+
+# --- topic -> script (step 1) -> podcast (step 2) ---
+
+
+def _install_writer(writer) -> None:
+    app.state.writer = writer
+
+
+def test_topic_to_script_to_podcast_in_two_steps():
+    from app.core.scriptwriter import FakeScriptWriter
+
+    with TestClient(app) as client:
+        _install_fake_engine()
+        _install_writer(FakeScriptWriter())
+        resp = client.post(
+            "/v1/podcast/script", json={"topic": "home composting", "duration_min": 1}
+        )
+        assert resp.status_code == 202
+        script_job = _await_job(client, resp.json()["job_id"])
+        assert script_job["kind"] == "script"
+        assert script_job["status"] == "done", script_job
+        assert script_job["audio_url"] is None
+        assert script_job["title"] == "A short episode about home composting"
+
+        script = client.get(script_job["script_url"]).json()
+        assert script["genders"] == {"Alice": "female", "Bob": "male"}
+        assert script["normalize_text"] is True
+        assert script["estimated_minutes"] > 0
+
+        # The user edits a line, then sends the script on as is.
+        script["turns"][1]["text"] = "Thanks, Alice. Let's dig in."
+        resp = client.post("/v1/podcast", json={**script, "format": "wav"})
+        assert resp.status_code == 202
+        episode = _await_job(client, resp.json()["job_id"])
+    assert episode["status"] == "done", episode
+    assert episode["title"] == "A short episode about home composting"
+    assert episode["total"] == len(script["turns"])
+    assert episode["voices"]["Alice"] == "fake-1"  # the female voice
+    assert episode["voices"]["Bob"] == "fake-2"
+
+
+def test_script_without_a_writer_is_a_400():
+    with TestClient(app) as client:
+        _install_writer(None)
+        resp = client.post("/v1/podcast/script", json={"topic": "anything at all"})
+        health = client.get("/health").json()
+    assert resp.status_code == 400
+    assert "No script writer" in resp.json()["detail"]
+    assert health["script_writer"] == "off"
+
+
+def test_script_writer_errors_are_recorded_on_the_job():
+    async def failing(brief):
+        raise ProviderError("openai", "slow down", kind="rate_limited")
+
+    with TestClient(app) as client:
+        _install_writer(failing)
+        job_id = client.post("/v1/podcast/script", json={"topic": "tea"}).json()["job_id"]
+        job = _await_job(client, job_id)
+    assert job["status"] == "error"
+    assert "slow down" in job["error"]
+
+
+def test_script_job_retry_writes_again():
+    from app.core.scriptwriter import FakeScriptWriter
+
+    fake = FakeScriptWriter()
+    calls: list[str] = []
+
+    async def flaky(brief):
+        calls.append(brief.topic)
+        if len(calls) == 1:
+            raise ProviderError("openai", "hiccup")
+        return await fake(brief)
+
+    with TestClient(app) as client:
+        _install_writer(flaky)
+        job_id = client.post(
+            "/v1/podcast/script",
+            json={"topic": "bees", "hosts": [{"name": "Lan", "gender": "female"},
+                                             {"name": "Minh", "gender": "male"}]},
+        ).json()["job_id"]
+        assert _await_job(client, job_id)["status"] == "error"
+        resp = client.post(f"/v1/jobs/{job_id}/retry")
+        assert resp.status_code == 202
+        retried = _await_job(client, resp.json()["job_id"])
+        script = client.get(retried["script_url"]).json()
+    assert retried["status"] == "done"
+    assert retried["retry_of"] == job_id
+    assert calls == ["bees", "bees"]
+    assert script["genders"] == {"Lan": "female", "Minh": "male"}  # same brief
+
+
+def test_script_endpoints_check_the_job_kind_and_state():
+    gate = threading.Event()
+
+    async def slow(brief):
+        while not gate.is_set():
+            await asyncio.sleep(0.01)
+        raise ProviderError("openai", "never mind")
+
+    with TestClient(app) as client:
+        _install_fake_engine()
+        _install_writer(slow)
+        script_id = client.post("/v1/podcast/script", json={"topic": "tea"}).json()["job_id"]
+        assert client.get(f"/v1/jobs/{script_id}/script").status_code == 409  # not done
+        assert client.get(f"/v1/jobs/{script_id}/audio").status_code == 404  # no audio
+        gate.set()
+        _await_job(client, script_id)
+
+        podcast_id = client.post(
+            "/v1/podcast", json={"script": "Alice: Hi.", "format": "pcm"}
+        ).json()["job_id"]
+        _await_job(client, podcast_id)
+        assert client.get(f"/v1/jobs/{podcast_id}/script").status_code == 404
+        assert client.get("/v1/jobs/nope/script").status_code == 404
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"topic": "x"},  # too short
+        {"topic": "tea", "duration_min": 30},
+        {"topic": "tea", "hosts": [{"name": "A"}, {"name": "a"}]},
+        {"topic": "tea", "hosts": [{"name": str(i)} for i in range(5)]},
+    ],
+)
+def test_script_request_validation(body):
+    with TestClient(app) as client:
+        resp = client.post("/v1/podcast/script", json=body)
+    assert resp.status_code == 422
