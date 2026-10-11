@@ -4,7 +4,7 @@ Read this before picking up work in this repo. It says where things actually
 stand. Update it at the end of each work session; this file goes stale fast if
 nobody touches it.
 
-Last checked: 2026-09-29.
+Last checked: 2026-10-11.
 
 ## Where things actually stand
 
@@ -35,7 +35,9 @@ Last checked: 2026-09-29.
   unsupported (documented in README and CLAUDE.md).
 - **`.env` is on `DEFAULT_PROVIDER=kokoro` / `DEFAULT_VOICE=af_heart`.** Gemini was
   removed on 2026-09-22; ElevenLabs is out of scope.
-- **ffmpeg isn't installed** on this machine, so only `wav` and `pcm` output work here.
+- **ffmpeg is installed** (2026-10-11, `C:\ffmpeg-master-latest-win64-gpl\bin`), so mp3, opus,
+  aac and flac work. Restart a running server after installing it, because `HAS_FFMPEG` is
+  read at import.
 - **The first Kokoro request after a server start takes about 40 s** (lazy model load).
   Preloading is a known to-do.
 - **`kokoro-tts/`** (vendored upstream checkout, its own git repo) is gitignored; the app
@@ -112,7 +114,7 @@ Last checked: 2026-09-29.
   1. The user switches Windows' power mode to **Best performance**.
   2. Rerun the final benchmark (`bench_latency.py --mode ws --chunking all --wps 5,15,40`)
      and record it here.
-  3. A valid `OPENAI_API_KEY`, to try the demo with a real LLM.
+  3. ~~A valid `OPENAI_API_KEY`~~ (done 2026-10-11); the user tries the demo with a real LLM.
   4. The user's listening check: joins, pauses, prosody at cut points.
 
 - **Phase 6 commit 4d (2026-10-07): Gradio voice chat demo** (`examples/voice_chat_ui.py`,
@@ -126,9 +128,8 @@ Last checked: 2026-09-29.
     **Stop** stops playback within 0.6 s, with the TTS log showing "speech cancelled".
     Enter → playback was ~2.0 s on the first question and ~1.3 s warm (TTS first audio
     0.45 s; answers repeated, so cache hits).
-  - **The `OPENAI_API_KEY` in `.env` is rejected by OpenAI (401).** The OpenAI provider
-    still registers (the key isn't empty) but every call returns 502, and the demo falls
-    back to the Fake LLM. **To do (user): put a valid key in `.env`.**
+  - ~~The `OPENAI_API_KEY` in `.env` was rejected (401).~~ **Fixed 2026-10-11:** the new
+    key works for chat and TTS, so the demo can now run with a real LLM.
 - **Phase 6 commit 4c (2026-10-07): adaptive chunking** (WS default
   `chunking: "adaptive"`).
   - **How it works:** the speaker pulls each chunk when it is ready (`take()`), sized
@@ -231,14 +232,42 @@ and (2) turns a topic or script into a finished multi-voice podcast.
 **Done when:** first audio within about 1.5 s of the LLM finishing its first sentence,
 no stutter for one listener, and barge-in works.
 
-### Phase 7: complete podcast
+### Phase 7: complete podcast (in progress, plan revised 2026-10-11)
 
-- ffmpeg for mp3 output.
-- Loudness normalization to about −16 LUFS (today it is peak only).
-- Topic → LLM-written dialogue → rendered episode.
-- Retry endpoint for failed jobs (cached turns make it cheap).
+**Decisions (2026-10-11):**
+- Loudness target **−19 LUFS**, true peak −1.5 dBTP, configurable. The output is mono, and −16
+  is the stereo norm. Measured on Kokoro speech: −19 fits in loudnorm's `linear` mode, while
+  −16 would exceed the true-peak limit and fall back to dynamic compression.
+- Topic flow in **two steps with review**: write a script, let the user read and edit it, then
+  render.
+- Per-sentence podcast rendering and Kokoro edge trimming are **deferred** (see follow-ups).
 
-**Done when:** a topic goes in and a normalized mp3 comes out.
+**Environment checked (2026-10-11):**
+- ffmpeg `N-127222` has `libmp3lame`, `loudnorm` and `ebur128`.
+- The OpenAI key works for chat (`gpt-4o-mini`, strict `json_schema`) and TTS.
+- Today `ffmpeg_encode` writes mp3 at 24 kHz / 32 kbps, which is too low.
+
+**Commits:**
+1. Job/podcast fixes:
+   - progress is written while rendering (it was only written at the end);
+   - atomic, threaded result write;
+   - `normalize_text` option;
+   - drop the dead `PODCAST_PAUSE_MS`.
+2. mp3 via `libmp3lame` (64k; 44.1 kHz for podcasts) with an ID3 title, plus two-pass
+   `loudnorm` (`linear=true`). Request fields: `loudness: lufs|peak|off`, `target_lufs`, `title`.
+   Stats go in the job meta.
+3. Store each job's spec in a new `spec` column (lightweight migration).
+   - `POST /v1/jobs/{id}/retry` creates a new job (`retry_of`) from `error`/`cancelled`.
+   - Per-kind job limits, so script jobs don't wait behind renders.
+4. `app/core/scriptwriter.py` (OpenAI structured output, plus a fake writer).
+   - `POST /v1/podcast/script` creates a `script` job.
+   - `GET /v1/jobs/{id}/script` returns a body that can be posted to `/v1/podcast` as is.
+   - Turns are capped at 1500 chars, split at whole sentences.
+5. CLI `--topic/--script-only`, smoke-test groups, and docs.
+
+**Done when:** topic → LLM script → review/edit → mp3 at 44.1 kHz and −19 ±1 LUFS (checked with
+`ebur128`). Progress rises during the render. A failed or restart-interrupted job retries
+without re-synthesizing turns that are already cached.
 
 ### Phase 9: packaging and operations
 
@@ -250,6 +279,16 @@ no stutter for one listener, and barge-in works.
 (Phase 8, a Vietnamese provider, was dropped by the language decision.)
 
 ### Smaller follow-ups
+
+- **Podcast rendering per sentence (deferred from Phase 7).** Today a turn is one provider call,
+  so:
+  - a Kokoro podcast holds the single Kokoro worker for a whole turn and blocks chatbot
+    sentences;
+  - cancel only lands after that turn;
+  - turns over 4096 chars fail on OpenAI;
+  - Kokoro's ~0.3 s + 0.5 s edge padding adds to `pause_ms`, giving gaps of about 1.4 s.
+
+  The fix is to split turns with `split_chunks` and trim with `EdgeTrimmer`, as streaming does.
 
 - Listen to `output/smoke_stream.wav` and confirm there are no clicks between sentences.
 - Optionally, verify a podcast render with OpenAI (this uses API quota).
