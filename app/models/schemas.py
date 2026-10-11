@@ -85,6 +85,11 @@ class PodcastRequest(BaseModel):
     format: AudioFormat = "wav"
     pause_ms: int = Field(600, ge=0, le=5000, description="Silence between turns.")
     normalize: bool = Field(True, description="Peak-normalize the stitched audio.")
+    normalize_text: bool = Field(
+        False,
+        description="Strip markdown, links and emoji from every turn before speaking "
+        "(recommended for LLM-written scripts).",
+    )
     speed: float = Field(1.0, ge=0.25, le=4.0)
     instructions: str | None = Field(None, description="Default style/tone hint.")
 

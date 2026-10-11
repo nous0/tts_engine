@@ -592,3 +592,90 @@ def test_cancel_unknown_job_returns_404():
     with TestClient(app) as client:
         resp = client.post("/v1/jobs/does-not-exist/cancel")
     assert resp.status_code == 404
+
+
+class GatedProvider(FakeProvider):
+    """Synthesizes the first turn at once, then waits until the test opens the gate."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.gate = threading.Event()
+        self.texts: list[str] = []
+
+    async def synthesize(self, text: str, voice: str, opts: SynthOpts) -> bytes:
+        self.calls += 1
+        self.texts.append(text)
+        if self.calls > 1:
+            while not self.gate.is_set():
+                await asyncio.sleep(0.01)
+        return tone(50)
+
+
+def test_podcast_progress_is_visible_while_rendering():
+    provider = GatedProvider()
+    with TestClient(app) as client:
+        app.state.engine = TTSEngine(
+            {"fake": provider}, default_provider="fake", default_voice="fake-1"
+        )
+        job_id = client.post(
+            "/v1/podcast",
+            json={"script": "Alice: One.\nBob: Two.\nAlice: Three.", "format": "pcm"},
+        ).json()["job_id"]
+
+        deadline = time.monotonic() + 5
+        job: dict = {}
+        while time.monotonic() < deadline:
+            job = client.get(f"/v1/jobs/{job_id}").json()
+            if job["progress"] >= 1:
+                break
+            time.sleep(0.02)
+        assert job["status"] == "running"
+        assert job["progress"] == 1
+        assert job["total"] == 3
+
+        provider.gate.set()
+        done = _await_job(client, job_id)
+    assert done["status"] == "done"
+    assert done["progress"] == 3
+
+
+def test_podcast_normalize_text_cleans_every_turn():
+    provider = GatedProvider()
+    provider.gate.set()
+    with TestClient(app) as client:
+        app.state.engine = TTSEngine(
+            {"fake": provider}, default_provider="fake", default_voice="fake-1"
+        )
+        job_id = client.post(
+            "/v1/podcast",
+            json={
+                "turns": [{"speaker": "Alice", "text": "**Hello** there! 🎉"}],
+                "format": "pcm",
+                "normalize_text": True,
+            },
+        ).json()["job_id"]
+        assert _await_job(client, job_id)["status"] == "done"
+    assert provider.texts == ["Hello there!"]
+
+
+def test_podcast_normalize_text_rejects_a_turn_left_empty():
+    with TestClient(app) as client:
+        _install_fake_engine()
+        resp = client.post(
+            "/v1/podcast",
+            json={"script": "Alice: Hi.\nBob: 🎉", "normalize_text": True},
+        )
+    assert resp.status_code == 400
+    assert "nothing left to say" in resp.json()["detail"]
+
+
+def test_podcast_result_is_written_without_leftover_temp_files():
+    with TestClient(app) as client:
+        _install_fake_engine()
+        job_id = client.post(
+            "/v1/podcast", json={"script": "Alice: Hi.", "format": "wav"}
+        ).json()["job_id"]
+        assert _await_job(client, job_id)["status"] == "done"
+        output_dir = app.state.output_dir
+    assert (output_dir / f"podcast_{job_id}.wav").exists()
+    assert not list(output_dir.glob("*.tmp"))

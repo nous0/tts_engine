@@ -15,15 +15,17 @@ engine and is trivial to test.
 
 from __future__ import annotations
 
+import inspect
 import json
 import re
 from collections.abc import Awaitable, Callable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from . import audio
 from .names import guess_gender
 from .providers.base import Gender, SynthOpts, Voice
+from .textnorm import normalize_for_speech
 
 # "Alice: text" — a speaker label is a short leading token before the colon.
 _SPEAKER_LINE = re.compile(r"^([^:\n]{1,60}?)\s*:\s*(.+)$")
@@ -33,8 +35,9 @@ DEFAULT_SPEAKER = "Speaker"
 
 DEFAULT_PAUSE_MS = 600
 
-# Called with (turns_done, turns_total) after each turn is synthesized.
-ProgressCallback = Callable[[int, int], None]
+# Called with (turns_done, turns_total) after each turn is synthesized. It may be a
+# coroutine function (the server writes progress to the job store), and is awaited then.
+ProgressCallback = Callable[[int, int], Awaitable[None] | None]
 
 # (text, voice, provider, opts) -> encoded audio bytes.
 SynthesizeFn = Callable[[str, str, str | None, SynthOpts], Awaitable[bytes]]
@@ -69,6 +72,15 @@ class PodcastSpec:
     instructions: str | None = None
 
 
+@dataclass(slots=True)
+class RenderResult:
+    """A rendered episode: the encoded file plus what is known about it."""
+
+    audio: bytes
+    duration_s: float
+    loudness: dict[str, Any] | None = None
+
+
 def parse_script(raw: Any) -> list[Turn]:
     """Build turns from JSON, a plain-text transcript, or already-structured data."""
     if isinstance(raw, str):
@@ -78,6 +90,21 @@ def parse_script(raw: Any) -> list[Turn]:
     if isinstance(raw, Sequence):
         return _parse_sequence(raw)
     raise ScriptError(f"Cannot read a script from {type(raw).__name__}.")
+
+
+def normalize_turns(turns: Sequence[Turn]) -> list[Turn]:
+    """Make each turn speakable: strip markdown, turn links into "link", drop emoji.
+
+    Meant for LLM-written scripts. A turn left with nothing to say is an error, not a
+    silent gap, so the caller sees which line was unusable.
+    """
+    result: list[Turn] = []
+    for index, turn in enumerate(turns):
+        text = normalize_for_speech(turn.text)
+        if not text:
+            raise ScriptError(f"Turn {index} has nothing left to say after normalizing.")
+        result.append(replace(turn, text=text))
+    return result
 
 
 def speakers(turns: Sequence[Turn]) -> list[str]:
@@ -160,7 +187,7 @@ async def render(
     spec: PodcastSpec,
     synthesize: SynthesizeFn,
     on_progress: ProgressCallback | None = None,
-) -> bytes:
+) -> RenderResult:
     """Synthesize every turn and stitch them into a single encoded file.
 
     Turns are rendered one at a time: for long-form audio, predictable provider
@@ -187,12 +214,15 @@ async def render(
         raw = await synthesize(turn.text, voice, turn.provider or spec.provider, opts)
         segments.append(audio.to_pcm(raw))
         if on_progress is not None:
-            on_progress(index, total)
+            reported = on_progress(index, total)
+            if inspect.isawaitable(reported):
+                await reported
 
     mixed = audio.concat(segments, pause_ms=spec.pause_ms)
     if spec.normalize:
         mixed = audio.normalize(mixed)
-    return await audio.encode(mixed, spec.format)
+    encoded = await audio.encode(mixed, spec.format)
+    return RenderResult(audio=encoded, duration_s=audio.duration_ms(mixed) / 1000)
 
 
 def _turns_field(data: dict) -> Any:

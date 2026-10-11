@@ -9,9 +9,11 @@ import pytest
 from app.core import audio
 from app.core.podcast import (
     PodcastSpec,
+    RenderResult,
     ScriptError,
     Turn,
     assign_voices,
+    normalize_turns,
     parse_script,
     render,
     speakers,
@@ -209,7 +211,7 @@ async def test_render_stitches_turns_with_pauses():
         normalize=False,
     )
     calls: list[tuple] = []
-    data = await render(spec, _recording_synth(calls, clip_ms=100))
+    data = (await render(spec, _recording_synth(calls, clip_ms=100))).audio
 
     # 3 clips of 100 ms + 2 gaps of 500 ms.
     assert audio.duration_ms(data) == pytest.approx(3 * 100 + 2 * 500, abs=2.0)
@@ -221,7 +223,7 @@ async def test_render_always_requests_pcm_from_the_provider():
         turns=parse_script("A: One."), voices={"A": "v1"}, format="wav", normalize=False
     )
     calls: list[tuple] = []
-    data = await render(spec, _recording_synth(calls))
+    data = (await render(spec, _recording_synth(calls))).audio
     assert calls[0][3] == "pcm"
     assert data[:4] == b"RIFF"
 
@@ -243,7 +245,7 @@ async def test_render_normalizes_when_enabled():
     async def quiet(text: str, voice: str, provider: str | None, opts: SynthOpts):
         return tone(50, amplitude=500)
 
-    data = await render(spec, quiet)
+    data = (await render(spec, quiet)).audio
     assert audio.peak(data) > 20_000
 
 
@@ -255,7 +257,7 @@ async def test_render_unwraps_wav_returned_by_a_provider():
     async def wav_provider(text: str, voice: str, provider: str | None, opts: SynthOpts):
         return audio.pcm_to_wav(tone(80))
 
-    data = await render(spec, wav_provider)
+    data = (await render(spec, wav_provider)).audio
     assert data[:4] != b"RIFF"
     assert audio.duration_ms(data) == pytest.approx(80, abs=2.0)
 
@@ -273,3 +275,46 @@ async def test_render_without_a_voice_raises():
     spec = PodcastSpec(turns=parse_script("A: One."), voices={}, format="pcm")
     with pytest.raises(ScriptError, match="No voice assigned"):
         await render(spec, _recording_synth([]))
+
+
+async def test_render_returns_the_episode_duration():
+    spec = PodcastSpec(
+        turns=parse_script("A: One.\nB: Two."),
+        voices={"A": "v1", "B": "v2"},
+        format="wav",
+        pause_ms=500,
+        normalize=False,
+    )
+    result = await render(spec, _recording_synth([], clip_ms=100))
+    assert isinstance(result, RenderResult)
+    assert result.audio[:4] == b"RIFF"
+    assert result.duration_s == pytest.approx(0.7, abs=0.005)
+
+
+async def test_render_awaits_an_async_progress_callback():
+    spec = PodcastSpec(
+        turns=parse_script("A: One.\nB: Two."), voices={"A": "v1", "B": "v2"}, format="pcm"
+    )
+    seen: list[tuple[int, int]] = []
+
+    async def on_progress(done: int, total: int) -> None:
+        seen.append((done, total))
+
+    await render(spec, _recording_synth([]), on_progress)
+    assert seen == [(1, 2), (2, 2)]
+
+
+def test_normalize_turns_makes_llm_text_speakable():
+    turns = normalize_turns(
+        [Turn(speaker="A", text="**Welcome** to the show! 🎉 See https://example.com")]
+    )
+    assert "*" not in turns[0].text
+    assert "🎉" not in turns[0].text
+    assert "https://" not in turns[0].text
+    assert turns[0].text.startswith("Welcome to the show!")
+    assert turns[0].speaker == "A"
+
+
+def test_normalize_turns_rejects_a_turn_left_empty():
+    with pytest.raises(ScriptError, match="Turn 1 has nothing left"):
+        normalize_turns([Turn(speaker="A", text="Hi."), Turn(speaker="B", text="🎉🎉")])

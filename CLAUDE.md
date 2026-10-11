@@ -173,8 +173,11 @@ Request flow: **route → `TTSEngine` → provider → (podcast only) audio pipe
   `None` when unsure), then whichever gender balances the cast. Each speaker gets the first
   *unused* catalog voice of that gender, so catalogs must list their best voices first and
   tag `Voice.gender`. `render` synthesizes turns **one after another** as PCM, then
-  concatenates them with `pause_ms` of silence, peak-normalizes, and encodes once. You can
-  override provider, voice, and instructions per turn.
+  concatenates them with `pause_ms` of silence, peak-normalizes, and encodes once. It returns
+  a `RenderResult` (`audio`, `duration_s`, `loudness`). `on_progress` may be sync (CLI) or
+  async; the route's async callback writes `progress` to the job store at most once a second.
+  You can override provider, voice, and instructions per turn. `normalize_turns` (request
+  `normalize_text`) runs `normalize_for_speech` on each turn.
 - **Jobs** (`app/core/jobs.py`): a SQLite job store that uses the stdlib `sqlite3` from
   worker threads (not aiosqlite). `JobStore.spawn` queues the render as an in-process
   asyncio task behind a semaphore (`MAX_CONCURRENT_JOBS`), and results are written to

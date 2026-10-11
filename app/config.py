@@ -39,7 +39,6 @@ class Settings(BaseSettings):
     # Podcast output + job store
     output_dir: str = "./output"
     jobs_db: str = "./output/jobs.db"
-    podcast_pause_ms: int = 600
     # Podcast renders that may run at once; the rest wait as "queued".
     max_concurrent_jobs: int = Field(1, ge=1, le=8)
     # Finished jobs (and their audio files) older than this are deleted; 0 keeps all.

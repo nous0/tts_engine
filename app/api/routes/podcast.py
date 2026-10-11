@@ -8,6 +8,10 @@ output directory.
 
 from __future__ import annotations
 
+import asyncio
+import os
+import time
+import uuid
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request, Response
@@ -26,6 +30,9 @@ from app.models.schemas import (
 )
 
 router = APIRouter(prefix="/v1", tags=["podcast"])
+
+# Progress is written to the job store at most this often (and always for the last turn).
+PROGRESS_INTERVAL_S = 1.0
 
 _MEDIA_TYPES: dict[str, str] = {
     "mp3": "audio/mpeg",
@@ -51,8 +58,10 @@ def _output_dir(request: Request) -> Path:
 
 def _to_turns(req: PodcastRequest) -> list[Turn]:
     if req.turns:
-        return podcast_core.parse_script([t.model_dump() for t in req.turns])
-    return podcast_core.parse_script(req.script or "")
+        turns = podcast_core.parse_script([t.model_dump() for t in req.turns])
+    else:
+        turns = podcast_core.parse_script(req.script or "")
+    return podcast_core.normalize_turns(turns) if req.normalize_text else turns
 
 
 async def _resolve_voices(
@@ -145,13 +154,19 @@ def _renderer(
         return await engine.synthesize(text, voice=voice, provider=provider, opts=opts)
 
     async def work() -> None:
-        pending: list[int] = []
+        last_write = 0.0
 
-        def on_progress(done: int, _total: int) -> None:
-            pending.append(done)
+        async def on_progress(done: int, total: int) -> None:
+            # Clients poll the job, so progress has to reach the store while rendering.
+            nonlocal last_write
+            now = time.monotonic()
+            if done < total and now - last_write < PROGRESS_INTERVAL_S:
+                return
+            last_write = now
+            await jobs.update(job_id, progress=done)
 
         try:
-            data = await podcast_core.render(spec, synthesize, on_progress)
+            result = await podcast_core.render(spec, synthesize, on_progress)
         except (
             AudioError,
             UnsupportedFormat,
@@ -163,16 +178,27 @@ def _renderer(
             await jobs.update(job_id, status=JobStatus.ERROR, error=str(exc))
             return
 
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        out_path.write_bytes(data)
+        await asyncio.to_thread(_write_atomic, out_path, result.audio)
         await jobs.update(
             job_id,
             status=JobStatus.DONE,
-            progress=pending[-1] if pending else len(spec.turns),
+            progress=len(spec.turns),
             result_path=str(out_path),
         )
 
     return work
+
+
+def _write_atomic(path: Path, data: bytes) -> None:
+    """Write via a temp file and rename, so a crash never leaves a truncated result."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f"{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        tmp.write_bytes(data)
+        os.replace(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
 
 
 @router.get("/jobs/{job_id}")
@@ -185,8 +211,8 @@ async def get_job(job_id: str, request: Request) -> JobResponse:
 
 @router.post("/jobs/{job_id}/cancel")
 async def cancel_job(job_id: str, request: Request) -> JobResponse:
-    """Cancel a queued or running job. A running render stops after the sentence
-    it is currently synthesizing."""
+    """Cancel a queued or running job. A running render stops once the turn it is
+    synthesizing finishes (a provider call can't be interrupted midway)."""
     try:
         job = await _jobs(request).cancel(job_id)
     except JobNotFound as exc:

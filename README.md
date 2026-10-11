@@ -192,6 +192,13 @@ Speakers you don't map are **cast automatically by gender**:
   `{"Host": "female"}`. `voices` still wins over everything.
 - The chosen map is returned as `voices` in `GET /v1/jobs/{id}`.
 
+Other options:
+- `pause_ms` sets the silence between turns (default 600).
+- `normalize_text: true` strips markdown, links and emoji from every turn. Use it for
+  LLM-written scripts.
+- `GET /v1/jobs/{id}` reports `progress` (turns rendered so far) out of `total` while the
+  job runs.
+
 ```bash
 curl -X POST http://127.0.0.1:8000/v1/podcast \
   -H "Content-Type: application/json" \
@@ -227,7 +234,11 @@ mixed into the audio.
   each one already uses every CPU core. Extra requests wait their turn.
 - **Podcast jobs queue:** `MAX_CONCURRENT_JOBS` (default 1) render at once, and the rest
   stay `queued`. Cancelling a queued job is immediate. A running job stops after the
-  sentence it is synthesizing.
+  turn it is synthesizing.
+- **A Kokoro podcast delays chatbot speech:** each turn is one Kokoro call on the single
+  Kokoro worker, so a WebSocket sentence can wait for the turn in progress to finish
+  (seconds to tens of seconds for a long turn). Per-sentence podcast rendering is a planned
+  follow-up.
 - **Restarts:** jobs a crashed or killed server left `queued`/`running` are marked
   `error` ("Interrupted by a server restart") on the next start.
 - **Cleanup:** finished jobs and their audio are deleted after `JOBS_RETENTION_DAYS`

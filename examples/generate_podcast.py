@@ -122,14 +122,17 @@ async def main() -> None:
         return await engine.synthesize(text, voice=voice, provider=provider, opts=opts)
 
     print("\nRendering...")
-    data = await podcast_core.render(spec, synthesize, on_progress)
+    result = await podcast_core.render(spec, synthesize, on_progress)
 
     out_path = args.out or Path(settings.output_dir) / f"{args.script.stem}.{args.format}"
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_bytes(data)
+    out_path.write_bytes(result.audio)
 
     elapsed = time.perf_counter() - started
-    print(f"\nDone in {elapsed:.1f}s -> {out_path} ({len(data) / 1024:.0f} KB)")
+    print(
+        f"\nDone in {elapsed:.1f}s -> {out_path} "
+        f"({len(result.audio) / 1024:.0f} KB, {result.duration_s:.1f}s of audio)"
+    )
 
 
 if __name__ == "__main__":
