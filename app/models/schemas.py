@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
 
 AudioFormat = Literal["mp3", "wav", "opus", "aac", "flac", "pcm"]
 JobState = Literal["queued", "running", "done", "error", "cancelled"]
+Loudness = Literal["lufs", "peak", "off"]
 Gender = Literal["female", "male"]
 
 
@@ -84,7 +85,21 @@ class PodcastRequest(BaseModel):
     provider: str | None = Field(None, description="Provider name; falls back to default.")
     format: AudioFormat = "wav"
     pause_ms: int = Field(600, ge=0, le=5000, description="Silence between turns.")
-    normalize: bool = Field(True, description="Peak-normalize the stitched audio.")
+    normalize: bool = Field(
+        True, description="Level the stitched audio; false is the same as loudness 'off'."
+    )
+    loudness: Loudness | None = Field(
+        None,
+        description="lufs: EBU R128 loudness to target_lufs (needs ffmpeg); peak: loudest "
+        "sample at -1 dBFS; off: as synthesized. Default: lufs when ffmpeg is installed, "
+        "else peak.",
+    )
+    target_lufs: float | None = Field(
+        None, ge=-30.0, le=-10.0, description="Loudness target; default PODCAST_TARGET_LUFS."
+    )
+    title: str | None = Field(
+        None, max_length=200, description="Episode title (mp3 ID3 tag, job status)."
+    )
     normalize_text: bool = Field(
         False,
         description="Strip markdown, links and emoji from every turn before speaking "
@@ -122,6 +137,13 @@ class JobResponse(BaseModel):
     audio_url: str | None = Field(None, description="Set once the render succeeds.")
     voices: dict[str, str] = Field(
         default_factory=dict, description="Resolved speaker -> voice map."
+    )
+    title: str | None = None
+    duration_s: float | None = Field(None, description="Episode length, once rendered.")
+    loudness: dict[str, Any] | None = Field(
+        None,
+        description="loudnorm measurements (input/output LUFS and true peak, and whether "
+        "one gain was enough: normalization_type 'linear').",
     )
 
 

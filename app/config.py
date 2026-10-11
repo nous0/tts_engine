@@ -39,6 +39,12 @@ class Settings(BaseSettings):
     # Podcast output + job store
     output_dir: str = "./output"
     jobs_db: str = "./output/jobs.db"
+    # Loudness of rendered episodes (EBU R128, needs ffmpeg). -19 LUFS suits mono speech;
+    # it sounds as loud as the -16 LUFS stereo norm.
+    podcast_target_lufs: float = Field(-19.0, ge=-30.0, le=-10.0)
+    # mp3 episodes: bitrate and sample rate (podcast platforms expect 44.1 kHz).
+    podcast_mp3_bitrate: str = Field("64k", pattern=r"^\d{2,3}k$")
+    podcast_mp3_sample_rate: int = Field(44100, ge=8000, le=48000)
     # Podcast renders that may run at once; the rest wait as "queued".
     max_concurrent_jobs: int = Field(1, ge=1, le=8)
     # Finished jobs (and their audio files) older than this are deleted; 0 keeps all.

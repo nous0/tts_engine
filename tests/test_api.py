@@ -679,3 +679,114 @@ def test_podcast_result_is_written_without_leftover_temp_files():
         output_dir = app.state.output_dir
     assert (output_dir / f"podcast_{job_id}.wav").exists()
     assert not list(output_dir.glob("*.tmp"))
+
+
+def _fake_loudness(monkeypatch) -> list:
+    """Pretend ffmpeg is installed and record what loudness_normalize was asked for."""
+    from app.core import audio
+
+    targets: list = []
+
+    async def loudness(pcm, target):
+        targets.append(target)
+        return pcm, {"output_i": target.integrated, "normalization_type": "linear"}
+
+    monkeypatch.setattr(audio, "HAS_FFMPEG", True)
+    monkeypatch.setattr(audio, "loudness_normalize", loudness)
+    return targets
+
+
+def test_podcast_defaults_to_lufs_and_reports_loudness_title_duration(monkeypatch):
+    targets = _fake_loudness(monkeypatch)
+    with TestClient(app) as client:
+        _install_fake_engine()
+        job_id = client.post(
+            "/v1/podcast",
+            json={"script": "Alice: Hi.\nBob: Hey.", "format": "wav", "title": "Pilot"},
+        ).json()["job_id"]
+        job = _await_job(client, job_id)
+    assert job["status"] == "done", job
+    assert [t.integrated for t in targets] == [-19.0]
+    assert job["loudness"] == {"output_i": -19.0, "normalization_type": "linear"}
+    assert job["title"] == "Pilot"
+    # Two 100 ms turns and the default 600 ms pause.
+    assert job["duration_s"] == pytest.approx(0.8, abs=0.01)
+
+
+def test_podcast_target_lufs_comes_from_the_request_or_settings(monkeypatch):
+    targets = _fake_loudness(monkeypatch)
+    monkeypatch.setenv("PODCAST_TARGET_LUFS", "-23")
+    with TestClient(app) as client:
+        _install_fake_engine()
+        for body in ({}, {"target_lufs": -16}):
+            job_id = client.post(
+                "/v1/podcast", json={"script": "Alice: Hi.", "format": "pcm", **body}
+            ).json()["job_id"]
+            assert _await_job(client, job_id)["status"] == "done"
+    assert [t.integrated for t in targets] == [-23.0, -16.0]
+
+
+def test_podcast_mp3_uses_the_podcast_rate_and_bitrate(monkeypatch):
+    from app.core import audio
+
+    _fake_loudness(monkeypatch)
+    seen: dict = {}
+
+    async def fake_ffmpeg_encode(pcm, fmt, **kwargs):
+        seen.update(kwargs, fmt=fmt)
+        return b"ID3-fake-mp3"
+
+    monkeypatch.setattr(audio, "ffmpeg_encode", fake_ffmpeg_encode)
+    with TestClient(app) as client:
+        _install_fake_engine()
+        job_id = client.post(
+            "/v1/podcast", json={"script": "Alice: Hi.", "format": "mp3", "title": "Ep 2"}
+        ).json()["job_id"]
+        job = _await_job(client, job_id)
+        audio_resp = client.get(job["audio_url"])
+    assert job["status"] == "done", job
+    assert seen == {
+        "fmt": "mp3",
+        "sample_rate": 44100,
+        "bitrate": "64k",
+        "metadata": {"title": "Ep 2"},
+    }
+    assert audio_resp.headers["content-type"] == "audio/mpeg"
+    assert audio_resp.content == b"ID3-fake-mp3"
+
+
+def test_podcast_without_ffmpeg_falls_back_to_peak():
+    # conftest makes the pipeline act as if ffmpeg were missing.
+    with TestClient(app) as client:
+        _install_fake_engine()
+        job_id = client.post(
+            "/v1/podcast", json={"script": "Alice: Hi.", "format": "pcm"}
+        ).json()["job_id"]
+        job = _await_job(client, job_id)
+        audio_resp = client.get(job["audio_url"])
+    assert job["status"] == "done"
+    assert job["loudness"] is None
+    from app.core import audio
+
+    assert audio.peak(audio_resp.content) > 25_000  # peak-normalized to -1 dBFS
+
+
+@pytest.mark.parametrize(
+    ("body", "detail"),
+    [
+        ({"loudness": "lufs"}, "Loudness 'lufs' requires ffmpeg"),
+        ({"format": "mp3"}, "requires ffmpeg"),
+    ],
+)
+def test_podcast_needing_ffmpeg_is_rejected_at_submit_without_it(body, detail):
+    with TestClient(app) as client:
+        _install_fake_engine()
+        resp = client.post("/v1/podcast", json={"script": "Alice: Hi.", **body})
+    assert resp.status_code == 400
+    assert detail in resp.json()["detail"]
+
+
+def test_podcast_rejects_an_out_of_range_target():
+    with TestClient(app) as client:
+        resp = client.post("/v1/podcast", json={"script": "Alice: Hi.", "target_lufs": -5})
+    assert resp.status_code == 422

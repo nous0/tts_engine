@@ -39,6 +39,9 @@ include = ["app*"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+markers = [
+    "real_ffmpeg: runs the real ffmpeg binary (skipped when it isn't on PATH)",
+]
 
 [tool.ruff]
 line-length = 100

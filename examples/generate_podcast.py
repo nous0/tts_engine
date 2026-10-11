@@ -4,6 +4,7 @@ Runs the podcast pipeline directly (no HTTP server needed):
 
     uv run python examples/generate_podcast.py examples/script.json
     uv run python examples/generate_podcast.py examples/script.json --format wav
+    uv run python examples/generate_podcast.py examples/script_trio.txt --format mp3 --title "Trio"
 
 The script may be JSON (a list of ``{"speaker": ..., "text": ...}`` objects) or
 plain text with ``Alice: ...`` lines. Speakers without an explicit voice are
@@ -18,6 +19,7 @@ import time
 from pathlib import Path
 
 from app.config import get_settings
+from app.core import audio
 from app.core import podcast as podcast_core
 from app.core.cache import FileCache
 from app.core.engine import TTSEngine
@@ -33,6 +35,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--format", default="wav", help="Output format (default: wav).")
     parser.add_argument("--pause-ms", type=int, default=600, help="Silence between turns.")
     parser.add_argument("--out", type=Path, default=None, help="Output file path.")
+    parser.add_argument("--title", default=None, help="Episode title (mp3 ID3 tag).")
+    parser.add_argument(
+        "--loudness",
+        choices=["lufs", "peak", "off"],
+        default=None,
+        help="lufs (EBU R128, needs ffmpeg), peak, or off (default: lufs if ffmpeg is found).",
+    )
+    parser.add_argument(
+        "--target-lufs", type=float, default=None, help="Loudness target (default: config)."
+    )
     parser.add_argument(
         "--voice",
         action="append",
@@ -104,12 +116,21 @@ async def main() -> None:
     for speaker, voice in voices.items():
         print(f"  {speaker:<12} -> {voice} ({gender_of.get(voice) or 'neutral'})")
 
+    loudness = podcast_core.pick_loudness(args.loudness, True, audio.HAS_FFMPEG)
+    mp3 = args.format == "mp3"
     spec = PodcastSpec(
         turns=turns,
         voices=voices,
         provider=args.provider,
         format=args.format,
         pause_ms=args.pause_ms,
+        loudness=loudness,
+        target_lufs=(
+            args.target_lufs if args.target_lufs is not None else settings.podcast_target_lufs
+        ),
+        title=args.title,
+        sample_rate=settings.podcast_mp3_sample_rate if mp3 else None,
+        bitrate=settings.podcast_mp3_bitrate if mp3 else None,
     )
 
     started = time.perf_counter()
@@ -127,6 +148,15 @@ async def main() -> None:
     out_path = args.out or Path(settings.output_dir) / f"{args.script.stem}.{args.format}"
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_bytes(result.audio)
+
+    if result.loudness:
+        stats = result.loudness
+        print(
+            f"Loudness: {stats.get('input_i')} -> {stats.get('output_i')} LUFS, "
+            f"true peak {stats.get('output_tp')} dBTP ({stats.get('normalization_type')})"
+        )
+    else:
+        print(f"Loudness: {loudness}")
 
     elapsed = time.perf_counter() - started
     print(

@@ -17,6 +17,8 @@ import sys
 import wave
 from array import array
 from collections.abc import Iterable
+from dataclasses import dataclass
+from typing import Any
 
 from .providers._audio import (
     CHANNELS,
@@ -25,6 +27,7 @@ from .providers._audio import (
     SAMPLE_RATE,
     SAMPLE_WIDTH,
     ffmpeg_encode,
+    ffmpeg_loudness_normalize,
     pcm_to_wav,
 )
 
@@ -34,6 +37,7 @@ __all__ = [
     "CHANNELS",
     "EdgeTrimmer",
     "HAS_FFMPEG",
+    "LoudnessTarget",
     "NATIVE_FORMATS",
     "SAMPLE_RATE",
     "SAMPLE_WIDTH",
@@ -41,6 +45,7 @@ __all__ = [
     "concat",
     "duration_ms",
     "encode",
+    "loudness_normalize",
     "normalize",
     "pcm_to_wav",
     "peak",
@@ -55,6 +60,9 @@ BYTES_PER_FRAME = CHANNELS * SAMPLE_WIDTH
 # Headroom left by the default normalization pass, in dB below full scale.
 DEFAULT_TARGET_DBFS = -1.0
 
+# Default loudness target for episodes (mono speech), see LoudnessTarget.
+DEFAULT_TARGET_LUFS = -19.0
+
 # Joining streamed chunks: samples quieter than this count as silence (about -44 dBFS).
 EDGE_THRESHOLD = 200
 EDGE_KEEP_MS = 30  # silence kept next to speech, so soft onsets/endings survive
@@ -68,6 +76,19 @@ PAUSE_AFTER_MS = {"sentence": 300, "clause": 150, "line": 450, "word": 40, "end"
 
 class AudioError(Exception):
     """Raised when audio cannot be decoded, mixed, or encoded as requested."""
+
+
+@dataclass(frozen=True, slots=True)
+class LoudnessTarget:
+    """An EBU R128 loudness target.
+
+    -19 LUFS integrated is the usual target for mono speech (it sounds as loud as a
+    -16 LUFS stereo podcast). Peaks are kept under ``true_peak`` (dBTP), the usual
+    ceiling for lossy encoding.
+    """
+
+    integrated: float = DEFAULT_TARGET_LUFS
+    true_peak: float = -1.5
 
 
 def duration_ms(pcm: bytes) -> float:
@@ -145,8 +166,8 @@ def normalize(pcm: bytes, target_dbfs: float = DEFAULT_TARGET_DBFS) -> bytes:
 
     Peak normalization is what keeps a stitched episode at a consistent level
     without ever clipping: quiet turns come up, hot turns come down, and the
-    small headroom below full scale survives later encoding. (Perceptual
-    loudness matching — EBU R128 / LUFS — needs ffmpeg and is a later concern.)
+    small headroom below full scale survives later encoding. Perceptual loudness
+    (LUFS) is ``loudness_normalize``, which needs ffmpeg; this is the fallback.
     """
     current = peak(pcm)
     if current <= 0:
@@ -155,8 +176,40 @@ def normalize(pcm: bytes, target_dbfs: float = DEFAULT_TARGET_DBFS) -> bytes:
     return apply_gain(pcm, target / current)
 
 
-async def encode(pcm: bytes, fmt: str) -> bytes:
-    """Encode raw PCM into ``fmt``, shelling out to ffmpeg for compressed containers."""
+async def loudness_normalize(
+    pcm: bytes, target: LoudnessTarget | None = None
+) -> tuple[bytes, dict[str, Any]]:
+    """Bring ``pcm`` to a loudness target (EBU R128); returns the PCM and the stats.
+
+    One gain for the whole episode, plus a limiter on rare peaks when needed
+    (``ffmpeg_loudness_normalize``). Needs ffmpeg. The result is still canonical
+    24 kHz mono PCM.
+    """
+    target = target or LoudnessTarget()
+    if not HAS_FFMPEG:
+        raise AudioError(
+            "Loudness normalization (LUFS) requires ffmpeg on the PATH. "
+            "Use loudness 'peak', or install ffmpeg."
+        )
+    try:
+        return await ffmpeg_loudness_normalize(pcm, target.integrated, target.true_peak)
+    except RuntimeError as exc:
+        raise AudioError(str(exc)) from exc
+
+
+async def encode(
+    pcm: bytes,
+    fmt: str,
+    *,
+    sample_rate: int | None = None,
+    bitrate: str | None = None,
+    metadata: dict[str, str] | None = None,
+) -> bytes:
+    """Encode raw PCM into ``fmt``, shelling out to ffmpeg for compressed containers.
+
+    ``sample_rate``, ``bitrate`` and ``metadata`` only apply to compressed formats; wav
+    and pcm stay canonical (24 kHz mono, no tags).
+    """
     if fmt == "pcm":
         return pcm
     if fmt == "wav":
@@ -167,7 +220,9 @@ async def encode(pcm: bytes, fmt: str) -> bytes:
             f"or install ffmpeg."
         )
     try:
-        return await ffmpeg_encode(pcm, fmt)
+        return await ffmpeg_encode(
+            pcm, fmt, sample_rate=sample_rate, bitrate=bitrate, metadata=metadata
+        )
     except KeyError as exc:
         raise AudioError(f"Unsupported output format '{fmt}'.") from exc
     except RuntimeError as exc:

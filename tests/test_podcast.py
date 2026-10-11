@@ -15,6 +15,7 @@ from app.core.podcast import (
     assign_voices,
     normalize_turns,
     parse_script,
+    pick_loudness,
     render,
     speakers,
 )
@@ -208,7 +209,7 @@ async def test_render_stitches_turns_with_pauses():
         voices={"Alice": "v1", "Bob": "v2"},
         format="pcm",
         pause_ms=500,
-        normalize=False,
+        loudness="off",
     )
     calls: list[tuple] = []
     data = (await render(spec, _recording_synth(calls, clip_ms=100))).audio
@@ -220,7 +221,7 @@ async def test_render_stitches_turns_with_pauses():
 
 async def test_render_always_requests_pcm_from_the_provider():
     spec = PodcastSpec(
-        turns=parse_script("A: One."), voices={"A": "v1"}, format="wav", normalize=False
+        turns=parse_script("A: One."), voices={"A": "v1"}, format="wav", loudness="off"
     )
     calls: list[tuple] = []
     data = (await render(spec, _recording_synth(calls))).audio
@@ -239,7 +240,7 @@ async def test_render_reports_progress_per_turn():
 
 async def test_render_normalizes_when_enabled():
     spec = PodcastSpec(
-        turns=parse_script("A: One."), voices={"A": "v1"}, format="pcm", normalize=True
+        turns=parse_script("A: One."), voices={"A": "v1"}, format="pcm", loudness="peak"
     )
 
     async def quiet(text: str, voice: str, provider: str | None, opts: SynthOpts):
@@ -251,7 +252,7 @@ async def test_render_normalizes_when_enabled():
 
 async def test_render_unwraps_wav_returned_by_a_provider():
     spec = PodcastSpec(
-        turns=parse_script("A: One."), voices={"A": "v1"}, format="pcm", normalize=False
+        turns=parse_script("A: One."), voices={"A": "v1"}, format="pcm", loudness="off"
     )
 
     async def wav_provider(text: str, voice: str, provider: str | None, opts: SynthOpts):
@@ -283,7 +284,7 @@ async def test_render_returns_the_episode_duration():
         voices={"A": "v1", "B": "v2"},
         format="wav",
         pause_ms=500,
-        normalize=False,
+        loudness="off",
     )
     result = await render(spec, _recording_synth([], clip_ms=100))
     assert isinstance(result, RenderResult)
@@ -318,3 +319,69 @@ def test_normalize_turns_makes_llm_text_speakable():
 def test_normalize_turns_rejects_a_turn_left_empty():
     with pytest.raises(ScriptError, match="Turn 1 has nothing left"):
         normalize_turns([Turn(speaker="A", text="Hi."), Turn(speaker="B", text="🎉🎉")])
+
+
+@pytest.mark.parametrize(
+    ("requested", "normalize", "has_ffmpeg", "expected"),
+    [
+        (None, True, True, "lufs"),
+        (None, True, False, "peak"),
+        (None, False, True, "off"),
+        ("peak", True, True, "peak"),
+        ("lufs", False, False, "lufs"),  # explicit wins; the caller rejects it
+    ],
+)
+def test_pick_loudness(requested, normalize, has_ffmpeg, expected):
+    assert pick_loudness(requested, normalize, has_ffmpeg) == expected
+
+
+async def test_render_lufs_normalizes_the_whole_mix_and_reports_stats(monkeypatch):
+    seen: dict = {}
+
+    async def fake_loudness(pcm, target):
+        seen["pcm_ms"] = audio.duration_ms(pcm)
+        seen["target"] = target
+        return pcm, {"output_i": -19.0, "normalization_type": "linear"}
+
+    monkeypatch.setattr(audio, "loudness_normalize", fake_loudness)
+    spec = PodcastSpec(
+        turns=parse_script("A: One.\nB: Two."),
+        voices={"A": "v1", "B": "v2"},
+        format="pcm",
+        pause_ms=200,
+        loudness="lufs",
+        target_lufs=-20.0,
+    )
+    result = await render(spec, _recording_synth([], clip_ms=100))
+    # One pass over the stitched episode (both turns and the pause), not per turn.
+    assert seen["pcm_ms"] == pytest.approx(400, abs=2.0)
+    assert seen["target"] == audio.LoudnessTarget(integrated=-20.0)
+    assert result.loudness == {"output_i": -19.0, "normalization_type": "linear"}
+
+
+async def test_render_encodes_with_title_rate_and_bitrate(monkeypatch):
+    seen: dict = {}
+
+    async def fake_encode(pcm, fmt, **kwargs):
+        seen.update(kwargs, fmt=fmt)
+        return b"MP3"
+
+    monkeypatch.setattr(audio, "encode", fake_encode)
+    spec = PodcastSpec(
+        turns=parse_script("A: One."),
+        voices={"A": "v1"},
+        format="mp3",
+        loudness="off",
+        title="Pilot",
+        sample_rate=44100,
+        bitrate="64k",
+    )
+    result = await render(spec, _recording_synth([]))
+    assert result.audio == b"MP3"
+    assert result.loudness is None
+    assert seen == {
+        "fmt": "mp3",
+        "sample_rate": 44100,
+        "bitrate": "64k",
+        "metadata": {"title": "Pilot"},
+    }

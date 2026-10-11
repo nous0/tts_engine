@@ -8,9 +8,9 @@ actually paste::
     Bob: Glad to be here.
 
 Rendering synthesizes each turn as raw PCM, stitches the turns with a configurable
-pause, normalizes the whole mix so no speaker sticks out, and encodes once at the
-end. Synthesis is injected as a callable, so this module stays independent of the
-engine and is trivial to test.
+pause, brings the whole mix to one loudness (EBU R128 via ffmpeg, or peak level) so no
+speaker sticks out, and encodes once at the end. Synthesis is injected as a callable,
+so this module stays independent of the engine and is trivial to test.
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ import json
 import re
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field, replace
-from typing import Any
+from typing import Any, Literal
 
 from . import audio
 from .names import guess_gender
@@ -34,6 +34,10 @@ _SPEAKER_LINE = re.compile(r"^([^:\n]{1,60}?)\s*:\s*(.+)$")
 DEFAULT_SPEAKER = "Speaker"
 
 DEFAULT_PAUSE_MS = 600
+
+# How the stitched episode's level is set: EBU R128 loudness (needs ffmpeg), peak level
+# (pure Python), or left alone.
+Loudness = Literal["lufs", "peak", "off"]
 
 # Called with (turns_done, turns_total) after each turn is synthesized. It may be a
 # coroutine function (the server writes progress to the job store), and is awaited then.
@@ -67,9 +71,14 @@ class PodcastSpec:
     provider: str | None = None
     format: str = "wav"
     pause_ms: int = DEFAULT_PAUSE_MS
-    normalize: bool = True
+    loudness: Loudness = "peak"
+    target_lufs: float = audio.DEFAULT_TARGET_LUFS
     speed: float = 1.0
     instructions: str | None = None
+    title: str | None = None
+    # Compressed output only (mp3 etc.): resample and bitrate; wav/pcm stay 24 kHz.
+    sample_rate: int | None = None
+    bitrate: str | None = None
 
 
 @dataclass(slots=True)
@@ -79,6 +88,18 @@ class RenderResult:
     audio: bytes
     duration_s: float
     loudness: dict[str, Any] | None = None
+
+
+def pick_loudness(requested: Loudness | None, normalize: bool, has_ffmpeg: bool) -> Loudness:
+    """The loudness mode to use: the requested one, else LUFS when ffmpeg can do it.
+
+    ``normalize=False`` (the older on/off switch) means "off" unless a mode is requested.
+    """
+    if requested is not None:
+        return requested
+    if not normalize:
+        return "off"
+    return "lufs" if has_ffmpeg else "peak"
 
 
 def parse_script(raw: Any) -> list[Turn]:
@@ -219,10 +240,22 @@ async def render(
                 await reported
 
     mixed = audio.concat(segments, pause_ms=spec.pause_ms)
-    if spec.normalize:
+    loudness: dict[str, Any] | None = None
+    if spec.loudness == "lufs":
+        target = audio.LoudnessTarget(integrated=spec.target_lufs)
+        mixed, loudness = await audio.loudness_normalize(mixed, target)
+    elif spec.loudness == "peak":
         mixed = audio.normalize(mixed)
-    encoded = await audio.encode(mixed, spec.format)
-    return RenderResult(audio=encoded, duration_s=audio.duration_ms(mixed) / 1000)
+    encoded = await audio.encode(
+        mixed,
+        spec.format,
+        sample_rate=spec.sample_rate,
+        bitrate=spec.bitrate,
+        metadata={"title": spec.title} if spec.title else None,
+    )
+    return RenderResult(
+        audio=encoded, duration_s=audio.duration_ms(mixed) / 1000, loudness=loudness
+    )
 
 
 def _turns_field(data: dict) -> Any:

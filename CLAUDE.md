@@ -173,8 +173,17 @@ Request flow: **route → `TTSEngine` → provider → (podcast only) audio pipe
   `None` when unsure), then whichever gender balances the cast. Each speaker gets the first
   *unused* catalog voice of that gender, so catalogs must list their best voices first and
   tag `Voice.gender`. `render` synthesizes turns **one after another** as PCM, then
-  concatenates them with `pause_ms` of silence, peak-normalizes, and encodes once. It returns
-  a `RenderResult` (`audio`, `duration_s`, `loudness`). `on_progress` may be sync (CLI) or
+  concatenates them with `pause_ms` of silence, sets the level (`spec.loudness`), and encodes
+  once (mp3: `libmp3lame`, 44.1 kHz/64k from settings, ID3 title).
+  - `lufs` (`audio.loudness_normalize` → `ffmpeg_loudness_normalize` in `providers/_audio.py`)
+    measures with loudnorm's analysis and applies **one gain** to the target (−19 LUFS).
+  - If that gain would push the true peak over −1.5 dBTP, a 4x-oversampled `alimiter` takes
+    just those peaks, and the gain is corrected once if limiting cost more than 0.5 LU.
+  - It deliberately doesn't use `loudnorm` itself: on Kokoro episodes it fell back to
+    dynamic mode (riding the gain over the whole file) because of a few plosives.
+  - `peak` is the pure-Python fallback without ffmpeg. `pick_loudness` picks the default.
+
+  `render` returns a `RenderResult` (`audio`, `duration_s`, `loudness`). `on_progress` may be sync (CLI) or
   async; the route's async callback writes `progress` to the job store at most once a second.
   You can override provider, voice, and instructions per turn. `normalize_turns` (request
   `normalize_text`) runs `normalize_for_speech` on each turn.
@@ -205,6 +214,10 @@ Request flow: **route → `TTSEngine` → provider → (podcast only) audio pipe
   at a tmp dir and clears the `get_settings()` lru_cache. If a test changes settings through env
   vars, call `get_settings.cache_clear()` so the change takes effect.
 - `asyncio_mode = "auto"`, so async tests need no decorator.
+- conftest also sets `app.core.audio.HAS_FFMPEG = False`, so podcast tests behave the same
+  with or without ffmpeg installed. Tests that need ffmpeg behavior monkeypatch it back.
+  Tests marked `real_ffmpeg` (`tests/test_loudness.py`) run the real binary and are skipped
+  without it.
 - conftest also sets `KOKORO_PRELOAD=false` and `KOKORO_TORCH_THREADS=0`, so app
   startup in tests never loads the model or imports torch. A slow background torch
   import made the preload tests flaky.

@@ -193,6 +193,19 @@ Speakers you don't map are **cast automatically by gender**:
 - The chosen map is returned as `voices` in `GET /v1/jobs/{id}`.
 
 Other options:
+- `format`: `mp3` episodes are 44.1 kHz mono at 64 kbps (`PODCAST_MP3_SAMPLE_RATE`,
+  `PODCAST_MP3_BITRATE`), tagged with `title` if you give one. Compressed formats need
+  ffmpeg.
+- `loudness` sets how the episode's level is matched:
+  - `lufs`, the default when ffmpeg is installed: EBU R128 loudness at `target_lufs`
+    (default `PODCAST_TARGET_LUFS=-19`, the usual level for mono speech; it sounds like
+    −16 LUFS stereo).
+  - `peak`, the default without ffmpeg: the loudest sample at −1 dBFS.
+  - `off`: no level matching (`normalize: false` means the same).
+- How `lufs` works: the whole episode gets one gain. If that would push the true peak above
+  −1.5 dBTP, a limiter catches just those peaks (rare plosives in TTS speech). The job's
+  `loudness` field reports the measurements (`output_i`, `output_tp`, and
+  `normalization_type` `linear` or `linear+limiter`).
 - `pause_ms` sets the silence between turns (default 600).
 - `normalize_text: true` strips markdown, links and emoji from every turn. Use it for
   LLM-written scripts.

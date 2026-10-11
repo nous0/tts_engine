@@ -253,9 +253,23 @@ no stutter for one listener, and barge-in works.
    - atomic, threaded result write;
    - `normalize_text` option;
    - drop the dead `PODCAST_PAUSE_MS`.
-2. mp3 via `libmp3lame` (64k; 44.1 kHz for podcasts) with an ID3 title, plus two-pass
-   `loudnorm` (`linear=true`). Request fields: `loudness: lufs|peak|off`, `target_lufs`, `title`.
-   Stats go in the job meta.
+2. **Done (2026-10-11).** mp3 via `libmp3lame` (64k; 44.1 kHz for podcasts) with an ID3
+   title, plus LUFS loudness. Request fields: `loudness: lufs|peak|off`, `target_lufs`,
+   `title`; stats go in the job meta.
+   - **Changed from the plan:** two-pass `loudnorm` with `linear=true` fell back to dynamic
+     mode on `script_trio.txt`. The raw episode measured −25.8 LUFS with a true peak of
+     −5.2 dBTP, so +6.8 dB would have clipped. Only 62 samples (0.009%) were above the
+     limit.
+   - **Now:** one gain, plus a 4x-oversampled `alimiter` only when the peaks need it.
+   - **Compared with loudnorm dynamic on the same episode:**
+
+     | method | LUFS | true peak (dBTP) | LRA | median gain wobble (dB) |
+     |---|---|---|---|---|
+     | gain + limiter | −19.0 | −2.0 | 3.8 | 0.05 |
+     | loudnorm dynamic | −19.3 | −1.5 | 3.5 | 0.24 |
+
+   - **Final `trio.mp3`:** 44.1 kHz mono 64 kbps, titled; `ebur128` measures −19.3 LUFS,
+     −2.2 dBTP.
 3. Store each job's spec in a new `spec` column (lightweight migration).
    - `POST /v1/jobs/{id}/retry` creates a new job (`retry_of`) from `error`/`cancelled`.
    - Per-kind job limits, so script jobs don't wait behind renders.

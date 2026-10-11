@@ -17,6 +17,8 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import FileResponse
 
+from app.config import get_settings
+from app.core import audio as audio_ops
 from app.core import podcast as podcast_core
 from app.core.audio import AudioError
 from app.core.engine import InvalidRequest, ProviderNotConfigured, TTSEngine
@@ -94,6 +96,9 @@ def _job_response(job: Job) -> JobResponse:
         error=job.error,
         audio_url=f"/v1/jobs/{job.id}/audio" if job.status is JobStatus.DONE else None,
         voices=job.meta.get("voices", {}),
+        title=job.meta.get("title"),
+        duration_s=job.meta.get("duration_s"),
+        loudness=job.meta.get("loudness"),
     )
 
 
@@ -117,26 +122,47 @@ async def create_podcast(req: PodcastRequest, request: Request) -> PodcastJobRes
         raise HTTPException(
             status_code=400, detail=str(UnsupportedFormat(req.format, provider.name))
         )
+    if req.format not in audio_ops.NATIVE_FORMATS and not audio_ops.HAS_FFMPEG:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Format '{req.format}' requires ffmpeg on the server; use wav or pcm.",
+        )
+    loudness = podcast_core.pick_loudness(req.loudness, req.normalize, audio_ops.HAS_FFMPEG)
+    if loudness == "lufs" and not audio_ops.HAS_FFMPEG:
+        raise HTTPException(
+            status_code=400,
+            detail="Loudness 'lufs' requires ffmpeg on the server; use 'peak' or 'off'.",
+        )
 
+    settings = get_settings()
     spec = PodcastSpec(
         turns=turns,
         voices=voices,
         provider=req.provider,
         format=req.format,
         pause_ms=req.pause_ms,
-        normalize=req.normalize,
+        loudness=loudness,
+        target_lufs=(
+            req.target_lufs if req.target_lufs is not None else settings.podcast_target_lufs
+        ),
         speed=req.speed,
         instructions=req.instructions,
+        title=req.title,
+        sample_rate=settings.podcast_mp3_sample_rate if req.format == "mp3" else None,
+        bitrate=settings.podcast_mp3_bitrate if req.format == "mp3" else None,
     )
 
     jobs = _jobs(request)
-    job = await jobs.create(
-        kind="podcast",
-        total=len(turns),
-        meta={"voices": voices, "format": req.format, "provider": req.provider},
-    )
+    meta = {
+        "voices": voices,
+        "format": req.format,
+        "provider": req.provider,
+        "title": req.title,
+        "loudness_mode": loudness,
+    }
+    job = await jobs.create(kind="podcast", total=len(turns), meta=meta)
     out_path = _output_dir(request) / f"podcast_{job.id}.{req.format}"
-    jobs.spawn(job.id, _renderer(jobs, engine, job.id, spec, out_path))
+    jobs.spawn(job.id, _renderer(jobs, engine, job.id, spec, out_path, meta))
 
     return PodcastJobResponse(
         job_id=job.id, status=JobStatus.QUEUED.value, status_url=f"/v1/jobs/{job.id}"
@@ -144,7 +170,12 @@ async def create_podcast(req: PodcastRequest, request: Request) -> PodcastJobRes
 
 
 def _renderer(
-    jobs: JobStore, engine: TTSEngine, job_id: str, spec: PodcastSpec, out_path: Path
+    jobs: JobStore,
+    engine: TTSEngine,
+    job_id: str,
+    spec: PodcastSpec,
+    out_path: Path,
+    meta: dict,
 ):
     """Build the coroutine factory that renders ``spec`` and records the result."""
 
@@ -184,6 +215,11 @@ def _renderer(
             status=JobStatus.DONE,
             progress=len(spec.turns),
             result_path=str(out_path),
+            meta={
+                **meta,
+                "duration_s": round(result.duration_s, 2),
+                "loudness": result.loudness,
+            },
         )
 
     return work
